@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+asyncpg
+redis
+passlib[bcrypt]
+PyJWT
+python-dotenv
+httpx
