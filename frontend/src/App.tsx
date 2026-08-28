@@ -1,7 +1,7 @@
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import React, { useState } from 'react';
-import api from './api';
+import api, { extractErrorMessage } from './api';
 import AdminIngestion from './AdminIngestion';
 import AdminReview from './AdminReview';
 import AdaptivePractice from './AdaptivePractice';
@@ -11,6 +11,14 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="container text-center" style={{ marginTop: '5rem' }}>Loading...</div>;
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="container text-center" style={{ marginTop: '5rem' }}>Loading...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!user.is_admin) return <Navigate to="/app" replace />;
   return <>{children}</>;
 }
 
@@ -25,8 +33,8 @@ function App() {
           <ul>
             <li><Link to="/app">Practice</Link></li>
             {user && <li><Link to="/analytics">Analytics</Link></li>}
-            {user && <li><Link to="/admin/ingestion">Upload PDF</Link></li>}
-            {user && <li><Link to="/admin/review">Admin Console</Link></li>}
+            {user?.is_admin && <li><Link to="/admin/ingestion">Upload PDF</Link></li>}
+            {user?.is_admin && <li><Link to="/admin/review">Admin Console</Link></li>}
           </ul>
           <div className="nav-auth-buttons">
             {user ? (
@@ -54,8 +62,8 @@ function App() {
             <Route path="/register" element={<Register />} />
             <Route path="/app" element={<ProtectedRoute><AdaptivePractice /></ProtectedRoute>} />
             <Route path="/analytics" element={<ProtectedRoute><AnalyticsView /></ProtectedRoute>} />
-            <Route path="/admin/ingestion" element={<ProtectedRoute><AdminIngestion /></ProtectedRoute>} />
-            <Route path="/admin/review" element={<ProtectedRoute><AdminReview /></ProtectedRoute>} />
+            <Route path="/admin/ingestion" element={<AdminRoute><AdminIngestion /></AdminRoute>} />
+            <Route path="/admin/review" element={<AdminRoute><AdminReview /></AdminRoute>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
@@ -67,7 +75,7 @@ function App() {
 function Home() {
   return (
     <div className="hero">
-      <h1>AI-Powered Revision,<br /><span className="gradient-text">100% Free Forever.</span></h1>
+      <h1>AI-Powered Revision,<br /><span style={{ color: 'var(--accent-color)' }}>100% Free Forever.</span></h1>
       <p className="subtitle">
         Authentic past-paper canvas, near-instant mark scheme feedback, and personalized weakness tracking to crush your GCSEs and A-Levels.
       </p>
@@ -95,7 +103,7 @@ function Login() {
       login('cookie-managed', userRes.data);
       navigate('/app');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Invalid email or password');
+      setError(extractErrorMessage(err, 'Invalid email or password'));
     }
   };
 
@@ -136,7 +144,7 @@ function Register() {
       login('cookie-managed', userRes.data);
       navigate('/app');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Registration failed');
+      setError(extractErrorMessage(err, 'Registration failed'));
     }
   };
 

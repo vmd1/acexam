@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional, List
-from dependencies import rate_limit, get_current_user_id
+from dependencies import rate_limit, get_current_admin_id
 from database import get_db
 import ingestion
 import json
 
-router = APIRouter(dependencies=[Depends(rate_limit)])
+router = APIRouter(dependencies=[Depends(rate_limit), Depends(get_current_admin_id)])
 
 class UpdateQuestionRequest(BaseModel):
     question_number: Optional[str] = None
@@ -31,7 +31,7 @@ async def upload_paper(
     paper_code: str = Form("8461/1H"),
     series: str = Form("June 2023"),
     spec_code: str = Form("4.2.1"),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_admin_id),
     db=Depends(get_db)
 ):
     if not file.filename.endswith(".pdf"):

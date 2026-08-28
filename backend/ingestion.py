@@ -105,7 +105,7 @@ async def run_full_ai_ingestion_pipeline(
             "question_text": q["text"],
             "marking_type": marking_type,
             "marking_dsl": dsl,
-            "mark_scheme_text": mark_scheme_text[:500] if mark_scheme_text else f"Official mark scheme rubric for Q{q['number']}",
+            "mark_scheme_text": mark_scheme_text if mark_scheme_text else f"Official mark scheme rubric for Q{q['number']}",
             "images": q_images,
             "needs_review": any(img.get("needs_review") for img in q_images)
         })

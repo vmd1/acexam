@@ -176,7 +176,8 @@ async def mark_question(
     \"\"\"{student_answer}\"\"\"
     """
     
-    raw_ai_res = await ai_pipeline.call_llm(user_prompt, system_prompt=system_prompt, temperature=0.1)
+    # NEVER call a hosted API here - see ai_pipeline.mark_with_selfhosted_model.
+    raw_ai_res = await ai_pipeline.mark_with_selfhosted_model(user_prompt, system_prompt=system_prompt)
     
     try:
         data = json.loads(raw_ai_res)

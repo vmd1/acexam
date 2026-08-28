@@ -27,6 +27,22 @@ def get_current_user_id(request: Request):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
+async def get_current_admin_id(request: Request):
+    from database import get_db
+    user_id = get_current_user_id(request)
+
+    db = get_db()
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        is_admin = await conn.fetchval("SELECT is_admin FROM users WHERE id = $1", user_id)
+
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return user_id
+
 async def rate_limit(request: Request, limit: int = 60, window: int = 60):
     from database import get_redis
     redis_client = get_redis()

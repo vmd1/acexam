@@ -82,8 +82,8 @@ export default function AnalyticsView() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '2rem' }}>
         {/* Specification Topic Mastery Tree Heatmap */}
         <div className="card">
-          <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span>🧬</span> Specification Topic Mastery Heatmap
+          <h3 style={{ marginBottom: '1.25rem' }}>
+            Specification Topic Mastery Heatmap
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             {data?.topic_mastery?.map((topic: any) => {
@@ -136,8 +136,8 @@ export default function AnalyticsView() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
           {/* Command Word Matrix */}
           <div className="card">
-            <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>📐</span> Command Word Competency Matrix
+            <h3 style={{ marginBottom: '1.25rem' }}>
+              Command Word Competency Matrix
             </h3>
             {data?.command_word_competency?.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -171,8 +171,8 @@ export default function AnalyticsView() {
 
           {/* Misconception Memory List */}
           <div className="card">
-            <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>🧠</span> Persistent Misconception Memory
+            <h3 style={{ marginBottom: '1.25rem' }}>
+              Persistent Misconception Memory
             </h3>
             {data?.misconceptions?.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -193,7 +193,7 @@ export default function AnalyticsView() {
                         textTransform: 'uppercase',
                         color: m.status === 'resolved' ? '#10b981' : '#f87171'
                       }}>
-                        {m.status === 'resolved' ? '✅ Resolved' : `⚠️ Active (${m.occurrences}x)`}
+                        {m.status === 'resolved' ? 'Resolved' : `Active (${m.occurrences}x)`}
                       </span>
                     </div>
                     <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>

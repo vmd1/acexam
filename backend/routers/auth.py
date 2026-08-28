@@ -88,7 +88,7 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         raise HTTPException(status_code=500, detail="Internal server error")
         
     async with db.acquire() as conn:
-        user = await conn.fetchrow("SELECT id, email, display_name, exam_board, year_group FROM users WHERE id = $1", user_id)
+        user = await conn.fetchrow("SELECT id, email, display_name, exam_board, year_group, is_admin FROM users WHERE id = $1", user_id)
         
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

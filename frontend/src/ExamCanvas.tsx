@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import api from './api';
+import api, { extractErrorMessage } from './api';
 import type { Question } from './types';
 
 interface ExamCanvasProps {
@@ -128,7 +128,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
         onAnswerSubmitted(res.data);
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to submit answer');
+      alert(extractErrorMessage(err, 'Failed to submit answer'));
     } finally {
       setSubmitting(false);
     }
@@ -232,7 +232,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
               cursor: 'pointer',
               fontWeight: 600
             }}>
-            ⌨️ Typed Answer
+Typed Answer
           </button>
           <button
             onClick={() => setMode('canvas')}
@@ -245,7 +245,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
               cursor: 'pointer',
               fontWeight: 600
             }}>
-            ✍️ Ink Canvas
+Ink Canvas
           </button>
         </div>
 
@@ -260,7 +260,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 padding: '0.2rem 0.5rem',
                 cursor: 'pointer'
               }}>
-              ✒️ Pen
+Pen
             </button>
             <button
               onClick={() => setTool('highlighter')}
@@ -271,7 +271,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 padding: '0.2rem 0.5rem',
                 cursor: 'pointer'
               }}>
-              🖍️ Highlight
+  Highlight
             </button>
             <button
               onClick={() => setTool('eraser')}
@@ -282,7 +282,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 padding: '0.2rem 0.5rem',
                 cursor: 'pointer'
               }}>
-              🧹 Eraser
+Eraser
             </button>
             <button
               onClick={handleUndo}
@@ -293,7 +293,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 padding: '0.2rem 0.5rem',
                 cursor: 'pointer'
               }}>
-              ↩️ Undo
+Undo
             </button>
             <button
               onClick={clearCanvas}
@@ -305,7 +305,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 cursor: 'pointer',
                 color: '#ef4444'
               }}>
-              🗑️ Clear
+Clear
             </button>
           </div>
         )}
@@ -379,22 +379,9 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ fontSize: '1.5rem' }}>
-                {markingResult.is_full_marks ? '✅' : '❌'}
-              </span>
               <strong style={{ fontSize: '1.1rem', color: markingResult.is_full_marks ? '#166534' : '#9f1239' }}>
                 {markingResult.marks_awarded} / {markingResult.marks_possible} Marks Awarded
               </strong>
-              <span style={{
-                background: markingResult.marked_by === 'dsl' ? '#e0e7ff' : '#fef3c7',
-                color: markingResult.marked_by === 'dsl' ? '#3730a3' : '#92400e',
-                fontSize: '0.75rem',
-                padding: '0.15rem 0.4rem',
-                borderRadius: '4px',
-                fontWeight: 600
-              }}>
-                {markingResult.marked_by === 'dsl' ? 'Deterministic DSL (<10ms)' : 'Spec Model (<300ms)'}
-              </span>
             </div>
             <button
               onClick={() => setShowMarkScheme(!showMarkScheme)}
@@ -407,7 +394,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                 cursor: 'pointer',
                 color: '#334155'
               }}>
-              {showMarkScheme ? 'Hide Mark Scheme' : '📖 View Mark Scheme'}
+              {showMarkScheme ? 'Hide Mark Scheme' : 'View Mark Scheme'}
             </button>
           </div>
 
@@ -440,7 +427,7 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
                   fontSize: '0.75rem',
                   fontWeight: 600
                 }}>
-                  ⚠️ Misconception Detected: {tag}
+Misconception detected: {tag}
                 </span>
               ))}
             </div>
@@ -478,17 +465,17 @@ export default function ExamCanvas({ question, onAnswerSubmitted, onNext }: Exam
             onClick={handleSubmit}
             disabled={submitting || (!answerText.trim() && mode === 'typed')}
             style={{
-              background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)',
+              background: '#4f46e5',
               color: '#ffffff',
               border: 'none',
-              borderRadius: '8px',
+              borderRadius: '6px',
               padding: '0.65rem 1.5rem',
               fontWeight: 600,
               fontSize: '0.95rem',
-              cursor: 'pointer',
-              boxShadow: '0 4px 6px -1px rgba(79, 70, 229, 0.3)'
+              cursor: submitting || (!answerText.trim() && mode === 'typed') ? 'not-allowed' : 'pointer',
+              opacity: submitting || (!answerText.trim() && mode === 'typed') ? 0.6 : 1
             }}>
-            {submitting ? 'Marking Instant Feedback...' : 'Submit & Mark Question'}
+            {submitting ? 'Marking...' : 'Submit & Mark Question'}
           </button>
         ) : (
           onNext && (

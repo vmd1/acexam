@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import re
@@ -22,47 +23,71 @@ async def call_llm(
     """
     # 1. Native Google Gemini API Integration (with Multi-Modal Vision Support)
     if GEMINI_API_KEY:
-        try:
-            import base64
-            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-            
-            parts = []
-            if system_prompt:
-                parts.append({"text": f"System Instructions: {system_prompt}\n\nTask: "})
-            parts.append({"text": prompt})
-            
-            if image_bytes:
-                b64_data = base64.b64encode(image_bytes).decode("utf-8")
-                parts.append({
-                    "inline_data": {
-                        "mime_type": image_mime_type,
-                        "data": b64_data
-                    }
-                })
-                
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "temperature": temperature
+        import base64
+        model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+
+        parts = []
+        if system_prompt:
+            parts.append({"text": f"System Instructions: {system_prompt}\n\nTask: "})
+        parts.append({"text": prompt})
+
+        if image_bytes:
+            b64_data = base64.b64encode(image_bytes).decode("utf-8")
+            parts.append({
+                "inline_data": {
+                    "mime_type": image_mime_type,
+                    "data": b64_data
                 }
+            })
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": temperature
             }
-            
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                res = await client.post(url, json=payload)
-                if res.status_code == 200:
-                    data = res.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        text_part = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        # Clean Markdown ```json wrapping if present
-                        cleaned = re.sub(r'^```(?:json)?\s*', '', text_part.strip(), flags=re.IGNORECASE)
-                        cleaned = re.sub(r'\s*```$', '', cleaned)
-                        return cleaned
-                else:
-                    print(f"Gemini API error ({res.status_code}): {res.text}")
-        except Exception as e:
-            print(f"Google Gemini API execution error: {e}")
+        }
+
+        # gemini-3.6-flash is a reasoning model that can spend a large
+        # thinking-token budget before producing visible output, so this
+        # needs real headroom - a tight timeout here reads as a silent,
+        # unlogged fallback to the local stub, not an obvious error.
+        # Transient network failures (timeouts, dropped connections) are
+        # common enough on real API calls to warrant a couple of retries
+        # before giving up and falling through to the local stub.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    res = await client.post(url, json=payload)
+                    if res.status_code == 200:
+                        data = res.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts_out = candidates[0].get("content", {}).get("parts", [])
+                            text_part = "".join(p.get("text", "") for p in parts_out if not p.get("thought"))
+                            if not text_part.strip():
+                                print(f"Gemini API returned no text part (finishReason={candidates[0].get('finishReason')})")
+                            else:
+                                # Clean Markdown ```json wrapping if present
+                                cleaned = re.sub(r'^```(?:json)?\s*', '', text_part.strip(), flags=re.IGNORECASE)
+                                cleaned = re.sub(r'\s*```$', '', cleaned)
+                                return cleaned
+                        else:
+                            print(f"Gemini API returned no candidates: {json.dumps(data)[:500]}")
+                    elif res.status_code in (429, 500, 502, 503, 504):
+                        print(f"Gemini API error ({res.status_code}), attempt {attempt}/{max_attempts}: {res.text[:300]}")
+                    else:
+                        print(f"Gemini API error ({res.status_code}): {res.text[:500]}")
+                        break
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                print(f"Gemini API network error, attempt {attempt}/{max_attempts}: {type(e).__name__}: {e}")
+            except Exception as e:
+                print(f"Google Gemini API execution error: {type(e).__name__}: {e}")
+                break
+
+            if attempt < max_attempts:
+                await asyncio.sleep(1.5 * attempt)
 
     # 2. OpenAI / vLLM API fallback if configured
     if OPENAI_API_KEY:
@@ -88,23 +113,41 @@ async def call_llm(
     # 3. Deterministic local AI processor fallback when no API key is provided
     return _local_ai_fallback_processor(prompt, system_prompt)
 
+async def mark_with_selfhosted_model(prompt: str, system_prompt: str) -> str:
+    """
+    §6: Live marking must NEVER call a hosted API (Gemini/OpenAI) - only the
+    self-hosted, per-spec-code fine-tuned model (once trained, see §6.5) is
+    permitted in this path. Until a spec code has a trained+gated adapter,
+    this intentionally stays on the deterministic local stub rather than
+    routing through call_llm(), so a configured GEMINI_API_KEY/OPENAI_API_KEY
+    (used for ingestion-time calls) can never be silently used for marking.
+    """
+    return _local_ai_fallback_processor(prompt, system_prompt)
+
 def _local_ai_fallback_processor(prompt: str, system_prompt: str) -> str:
     """
     High-accuracy rule-based & heuristic fallback ensuring the pipeline runs
     out-of-the-box in offline/development environments without external API keys.
     """
     p_lower = prompt.lower()
-    
+
     # 1. DSL Generation request
+    # Only inspect the actual question/mark-scheme content, not the boilerplate
+    # "Available DSL Operators" menu (which always lists every operator name,
+    # e.g. "MCQ:OPTION" - matching against the full prompt would misclassify
+    # every question as multiple choice).
     if "generate deterministic dsl" in p_lower or "dsl:" in p_lower:
-        if "option" in p_lower or "mcq" in p_lower:
+        q_match = re.search(r'Question:\s*(.*?)\s*Mark Value:', prompt, re.DOTALL | re.IGNORECASE)
+        scheme_match = re.search(r'Mark Scheme:\s*(.*?)\s*Available DSL Operators:', prompt, re.DOTALL | re.IGNORECASE)
+        content_lower = ((q_match.group(1) if q_match else "") + " " + (scheme_match.group(1) if scheme_match else "")).lower()
+        if re.search(r'\b(option [a-d]\b|multiple choice|which of the following)', content_lower):
             return json.dumps({"marking_dsl": "MCQ:A", "reasoning": "Detected multiple choice"})
-        if "calculate" in p_lower or "magnification" in p_lower or "value" in p_lower:
+        if "calculate" in content_lower or "magnification" in content_lower or "value" in content_lower:
             return json.dumps({"marking_dsl": "EXACT:300 OR RANGE:299.5,300.5", "reasoning": "Numerical calculation"})
         return json.dumps({"marking_dsl": "ANY:glucose,sugar AND CONTAIN:respiration", "reasoning": "Keyword rubric"})
 
     # 2. Image description request
-    if "describe this exam diagram" in p_lower or "image description" in p_lower:
+    if "scientific diagram" in p_lower or "image description" in p_lower:
         return json.dumps({
             "description": "Scientific schematic diagram showing labelled biological structures with scale bar.",
             "components": ["Cell membrane", "Nucleus", "Cytoplasm", "Scale bar"],
@@ -251,16 +294,53 @@ async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_s
     - RANGE:min,max (numerical tolerance)
     - Boolean AND / OR logic
 
-    Output strictly valid JSON with key "marking_dsl".
+    Output ONLY a flat JSON object with exactly one key, "marking_dsl", whose
+    value is a single DSL expression string (combine multiple marking points
+    with AND / OR inside that one string). Do not nest objects, do not add
+    any other keys, do not return a list of marking points.
     """
     res = await call_llm(prompt, temperature=0.1)
+    fallback = f"CONTAIN:{question_text.split()[-1]}"
     try:
         data = json.loads(res)
-        return data.get("marking_dsl", f"CONTAIN:{question_text.split()[-1]}")
+        dsl = data.get("marking_dsl", fallback)
+        return _coerce_dsl_to_string(dsl, fallback)
     except Exception:
         # Fallback to keyword from mark scheme
         first_key = [w for w in re.findall(r'\b[a-zA-Z]{4,}\b', mark_scheme) if w.lower() not in {'allow', 'accept', 'marks', 'ignore'}][:1]
         return f"CONTAIN:{first_key[0]}" if first_key else "CONTAIN:correct"
+
+def _coerce_dsl_to_string(dsl: Any, fallback: str) -> str:
+    """
+    Models don't always follow an instructed flat-string schema (e.g. Gemini
+    sometimes nests a per-marking-point breakdown instead of one flat DSL
+    string). Recursively pull out any nested "dsl" string values and combine
+    them with OR, rather than letting a non-string value reach the DB.
+    """
+    if isinstance(dsl, str) and dsl.strip():
+        return dsl.strip()
+
+    found: List[str] = []
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            nested = node.get("dsl")
+            if isinstance(nested, str) and nested.strip():
+                found.append(nested.strip())
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(dsl)
+    if found:
+        # dedupe while preserving order
+        seen = set()
+        unique = [f for f in found if not (f in seen or seen.add(f))]
+        return " OR ".join(f"({f})" for f in unique) if len(unique) > 1 else unique[0]
+
+    return fallback
 
 async def scan_examiner_report_for_misconceptions(report_text: str, spec_code: str) -> List[Dict[str, Any]]:
     """

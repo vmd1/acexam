@@ -1,8 +1,13 @@
 fastapi
-uvicorn
+uvicorn[standard]
 asyncpg
 redis
-passlib[bcrypt]
+bcrypt
 PyJWT
 python-dotenv
 httpx
+python-multipart
+email-validator
+PyMuPDF
+pdfplumber
+Pillow

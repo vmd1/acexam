@@ -20,4 +20,5 @@ export interface User {
   display_name: string;
   exam_board?: string;
   year_group?: string;
+  is_admin?: boolean;
 }

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import api from './api';
+import api, { extractErrorMessage } from './api';
 
 export default function AdminIngestion() {
   const [qpFile, setQpFile] = useState<File | null>(null);
@@ -41,7 +41,7 @@ export default function AdminIngestion() {
       });
       setResult(res.data);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Upload failed');
+      setError(extractErrorMessage(err, 'Upload failed'));
     } finally {
       setUploading(false);
     }
@@ -122,14 +122,14 @@ export default function AdminIngestion() {
             className="btn btn-primary"
             disabled={!qpFile || uploading}
             style={{ width: '100%', padding: '0.85rem', fontSize: '1.05rem', fontWeight: 700 }}>
-            {uploading ? '⚡ Executing AI Multi-Stage Pipeline...' : '🚀 Execute AI Ingestion Pipeline'}
+            {uploading ? 'Executing AI Multi-Stage Pipeline...' : 'Execute AI Ingestion Pipeline'}
           </button>
         </form>
 
         {result && (
           <div style={{ marginTop: '2rem', padding: '1.5rem', background: '#1e293b', borderRadius: '10px', border: '1px solid #3b82f6' }}>
-            <h3 style={{ marginBottom: '1rem', color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>✨</span> {result.message}
+            <h3 style={{ marginBottom: '1rem', color: '#38bdf8' }}>
+              {result.message}
             </h3>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', color: '#cbd5e1', fontSize: '0.9rem' }}>
               <div><strong>Paper ID:</strong> <code>{result.paper_id}</code></div>

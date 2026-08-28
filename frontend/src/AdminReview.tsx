@@ -77,12 +77,12 @@ export default function AdminReview() {
           <button
             onClick={() => setActiveTab('papers')}
             className={`btn ${activeTab === 'papers' ? 'btn-primary' : 'btn-outline'}`}>
-            📄 Past Papers ({papers.length})
+Past Papers ({papers.length})
           </button>
           <button
             onClick={() => setActiveTab('misconceptions')}
             className={`btn ${activeTab === 'misconceptions' ? 'btn-primary' : 'btn-outline'}`}>
-            🏷️ Misconception Taxonomy ({misconceptions.length})
+Misconception Taxonomy ({misconceptions.length})
           </button>
         </div>
       </div>
@@ -138,7 +138,7 @@ export default function AdminReview() {
                 </div>
                 {selectedPaper.status !== 'published' && (
                   <button onClick={() => handlePublishPaper(selectedPaper.id)} className="btn btn-primary">
-                    ✅ Publish to Question Bank
+Publish to Question Bank
                   </button>
                 )}
               </div>
@@ -226,7 +226,7 @@ export default function AdminReview() {
                 <div>
                   {m.approved_at ? (
                     <span style={{ color: '#10b981', fontWeight: 700, fontSize: '0.85rem' }}>
-                      ✅ Approved
+Approved
                     </span>
                   ) : (
                     <button

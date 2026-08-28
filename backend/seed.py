@@ -1,16 +1,29 @@
 import asyncio
 import asyncpg
+import bcrypt
 import os
 import json
 from dotenv import load_dotenv
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+SEED_ADMIN_EMAIL = os.getenv("SEED_ADMIN_EMAIL", "admin@acexam.dev")
+SEED_ADMIN_PASSWORD = os.getenv("SEED_ADMIN_PASSWORD", "AdminDev123!")
 
 async def seed_data():
     print(f"Connecting to {DATABASE_URL}...")
     conn = await asyncpg.connect(DATABASE_URL)
-    
+
+    # 0. Seed a dev admin account (idempotent) so the ingestion/review
+    # console is testable without manually flipping is_admin in the DB.
+    admin_hash = bcrypt.hashpw(SEED_ADMIN_PASSWORD.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    await conn.execute('''
+        INSERT INTO users (email, password_hash, display_name, is_admin)
+        VALUES ($1, $2, 'Acexam Admin', true)
+        ON CONFLICT (email) DO NOTHING
+    ''', SEED_ADMIN_EMAIL, admin_hash)
+    print(f"Ensured dev admin account exists: {SEED_ADMIN_EMAIL}")
+
     # 1. Seed Spec Topics
     topics = [
         ("AQA", "Biology", "4.1.1", "Cell structure and microscopes"),
@@ -57,7 +70,15 @@ async def seed_data():
         
     print(f"Seeded {len(misconceptions)} misconception tags.")
     
-    # 3. Seed Sample Published Past Paper
+    # 3. Seed Sample Published Past Paper (idempotent - skip if already seeded)
+    existing_paper_id = await conn.fetchval('''
+        SELECT id FROM papers WHERE source_pdf_url = 'https://cdn.acexam.app/papers/aqa-bio-2023-1h.pdf'
+    ''')
+    if existing_paper_id:
+        print("Sample paper already seeded, skipping paper/question seed.")
+        await conn.close()
+        return
+
     paper_id = await conn.fetchval('''
         INSERT INTO papers (exam_board, subject, paper_code, series, source_pdf_url, status)
         VALUES ('AQA', 'Biology', '8461/1H', 'June 2023 Paper 1 Higher', 'https://cdn.acexam.app/papers/aqa-bio-2023-1h.pdf', 'published')

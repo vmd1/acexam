@@ -60,7 +60,6 @@ export default function AdaptivePractice() {
     return (
       <div className="container" style={{ maxWidth: '650px', marginTop: '3rem', textAlign: 'center' }}>
         <div className="card" style={{ padding: '3rem' }}>
-          <div style={{ fontSize: '3.5rem', marginBottom: '1rem' }}>🎉</div>
           <h2 style={{ marginBottom: '0.5rem' }}>Practice Session Completed!</h2>
           <p style={{ color: '#94a3b8', marginBottom: '2rem' }}>
             Your Master Student Profile has been updated with real-time EWMA mastery scores.
@@ -133,7 +132,7 @@ export default function AdaptivePractice() {
               borderRadius: '6px',
               fontSize: '0.8rem'
             }}>
-              🎯 Targeting {focusReason.active_misconceptions_count} active misconception(s)
+              Targeting {focusReason.active_misconceptions_count} active misconception(s)
             </span>
           )}
         </div>
