@@ -8,6 +8,81 @@ from typing import List, Dict, Any, Tuple
 MEDIA_DIR = os.path.join(os.path.dirname(__file__), "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
+# Hard cap on images extracted per paper - a safety net against runaway
+# vision-API cost if the heuristic below still over-triggers on an unusual
+# real-world PDF layout.
+MAX_IMAGES_PER_PAPER = 20
+
+def _find_diagram_clusters(page) -> List["fitz.Rect"]:
+    """
+    Real exam PDFs are full of vector drawing primitives that are NOT
+    diagrams: page border frames, table/answer-line rulings, tick boxes.
+    A naive ">=3 drawings on the page" check (and a bounding box spanning
+    ALL of them) locks onto the page border and rasterizes the entire page
+    as an "image" - on a 40-page real paper that meant ~1 vision call pair
+    per page instead of ~1 per actual diagram.
+
+    This filters out border/frame-sized rects and hairline rulings first,
+    then clusters the remaining candidate drawings by spatial proximity,
+    and only keeps clusters that look diagram-shaped: several distinct
+    primitives, occupying a plausible (not tiny, not near-full-page) area.
+    """
+    page_rect = page.rect
+    page_area = page_rect.width * page_rect.height
+
+    drawings = page.get_drawings()
+    if not drawings:
+        return []
+
+    candidates = []
+    for d in drawings:
+        r = d.get("rect")
+        if not r or r.width <= 0 or r.height <= 0:
+            continue
+        # Drop page border/frame rects (span most of the page in either axis).
+        if r.width >= 0.85 * page_rect.width and r.height >= 0.85 * page_rect.height:
+            continue
+        # Drop hairline rulings (a table border or answer-writing line is a
+        # rect that's essentially 1-dimensional).
+        if r.width < 3 or r.height < 3:
+            continue
+        candidates.append(r)
+
+    if len(candidates) < 5:
+        return []
+
+    # Merge overlapping/nearby rects into clusters (simple greedy union).
+    clusters: List["fitz.Rect"] = []
+    counts: List[int] = []
+    pad = 15
+    for r in candidates:
+        expanded = fitz.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
+        merged = False
+        for i, c in enumerate(clusters):
+            if expanded.intersects(c):
+                clusters[i] = c | r
+                counts[i] += 1
+                merged = True
+                break
+        if not merged:
+            clusters.append(fitz.Rect(r))
+            counts.append(1)
+
+    results = []
+    for cluster_rect, count in zip(clusters, counts):
+        area_frac = (cluster_rect.width * cluster_rect.height) / page_area if page_area else 0
+        # A real diagram cluster: multiple distinct primitives, and a
+        # plausible figure-sized footprint - not a single stray tick box,
+        # not a near-full-page region (which is almost certainly page
+        # furniture we failed to filter, not one diagram).
+        if count >= 5 and 0.01 <= area_frac <= 0.6:
+            results.append(fitz.Rect(
+                cluster_rect.x0 - 5, cluster_rect.y0 - 5,
+                cluster_rect.x1 + 5, cluster_rect.y1 + 5
+            ))
+
+    return results
+
 def is_image_valid_and_non_blank(image_bytes: bytes, min_dimension: int = 40) -> Tuple[bool, str]:
     """
     Sanity check for image:
@@ -91,42 +166,35 @@ def extract_all_visuals_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         # Path 2: Vector Path Drawings Fallback
         # If page contains vector drawings (graphs, diagrams, electric circuits)
         try:
-            drawings = page.get_drawings()
-            if drawings and len(drawings) >= 3:
-                # Calculate bounding box encompassing the vector paths
-                rects = [d["rect"] for d in drawings if d.get("rect")]
-                if rects:
-                    min_x0 = min(r.x0 for r in rects)
-                    min_y0 = min(r.y0 for r in rects)
-                    max_x1 = max(r.x1 for r in rects)
-                    max_y1 = max(r.y1 for r in rects)
-                    
-                    clip_rect = fitz.Rect(min_x0 - 5, min_y0 - 5, max_x1 + 5, max_y1 + 5)
-                    # Rasterize at 300 DPI (approx 4.16x zoom)
-                    pix = page.get_pixmap(dpi=300, clip=clip_rect)
-                    vec_bytes = pix.tobytes("png")
-                    
-                    valid, reason = is_image_valid_and_non_blank(vec_bytes)
-                    checksum = hashlib.sha256(vec_bytes).hexdigest()
-                    
-                    if checksum not in seen_hashes:
-                        seen_hashes.add(checksum)
-                        file_name = f"{checksum}.png"
-                        file_path = os.path.join(MEDIA_DIR, file_name)
-                        with open(file_path, "wb") as f:
-                            f.write(vec_bytes)
-                            
-                        extracted_images.append({
-                            "page": page_num + 1,
-                            "type": "vector_rasterized",
-                            "ext": "png",
-                            "checksum": checksum,
-                            "url": f"/api/media/{file_name}",
-                            "is_valid": valid,
-                            "validation_reason": reason,
-                            "needs_review": not valid,
-                            "bbox": [min_x0, min_y0, max_x1, max_y1]
-                        })
+            for clip_rect in _find_diagram_clusters(page):
+                pix = page.get_pixmap(dpi=300, clip=clip_rect)
+                vec_bytes = pix.tobytes("png")
+
+                valid, reason = is_image_valid_and_non_blank(vec_bytes)
+                checksum = hashlib.sha256(vec_bytes).hexdigest()
+
+                if checksum in seen_hashes:
+                    continue
+                seen_hashes.add(checksum)
+                file_name = f"{checksum}.png"
+                file_path = os.path.join(MEDIA_DIR, file_name)
+                with open(file_path, "wb") as f:
+                    f.write(vec_bytes)
+
+                extracted_images.append({
+                    "page": page_num + 1,
+                    "type": "vector_rasterized",
+                    "ext": "png",
+                    "checksum": checksum,
+                    "url": f"/api/media/{file_name}",
+                    "is_valid": valid,
+                    "validation_reason": reason,
+                    "needs_review": not valid,
+                    "bbox": [clip_rect.x0, clip_rect.y0, clip_rect.x1, clip_rect.y1]
+                })
+
+                if len(extracted_images) >= MAX_IMAGES_PER_PAPER:
+                    return extracted_images
         except Exception as e:
             print(f"Error extracting vector drawings on page {page_num+1}: {e}")
             

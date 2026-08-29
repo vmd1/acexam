@@ -273,6 +273,103 @@ async def generate_dual_image_descriptions(image_dict: Dict[str, Any]) -> Tuple[
     is_agreed = jaccard_score >= 0.65
     return desc_a_text, desc_b_text, is_agreed, round(jaccard_score, 3)
 
+async def split_paper_into_questions(page_texts: List[str], mark_scheme_text: str) -> List[Dict[str, Any]]:
+    """
+    §3.1 AI-driven joint question + mark-scheme splitting.
+
+    Real exam board PDFs render question numbers with irregular character
+    spacing (e.g. AQA prints "01.4" as separate glyphs that extract as
+    "0 1 . 4\\n") that a regex boundary detector cannot reliably parse -
+    verified against a real AQA GCSE Biology paper, where regex found 2
+    questions out of ~25+. This sends the full paper (page-marked) and mark
+    scheme to the model and asks for one structured entry per question,
+    each carrying its OWN isolated mark scheme text rather than the whole
+    document's mark scheme.
+
+    Returns [] on any failure so the caller can fall back to regex.
+
+    A single call to this is not reliable enough on its own: on a real
+    52-question paper, identical calls sometimes returned the full correct
+    breakdown and sometimes an empty {{"questions": []}} with no error
+    (valid JSON, just the model declining to find anything) - so this
+    retries a few times and keeps the best (most questions) result rather
+    than trusting the first response.
+    """
+    numbered_pages = "\n\n".join(f"[PAGE {i + 1}]\n{text}" for i, text in enumerate(page_texts))
+
+    prompt = f"""
+    You are given the full text of a UK exam board question paper (with [PAGE N] markers) and its mark scheme.
+    Extract every distinct question and sub-question (e.g. "1", "01.1", "3(b)(ii)") in the order they appear.
+
+    For each one, output:
+    - question_number: the number/label as printed (e.g. "01.4", "3(b)(ii)")
+    - question_text: the full text of just that question/sub-question (not neighbouring questions, not headers/footers/instructions)
+    - mark_value: the integer mark value from its "[N marks]" annotation. If not stated, use 1.
+    - page: the page number (from the [PAGE N] markers) where this question's text appears
+    - mark_scheme_text: ONLY this question's corresponding mark scheme text, extracted from the Mark Scheme section below - not the whole mark scheme document, not other questions' marking points
+
+    Ignore administrative/boilerplate text: "Do not write outside the box", print/version codes, blank answer lines, page numbers.
+
+    Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "..."}}, ...]}}
+
+    QUESTION PAPER:
+    \"\"\"{numbered_pages[:80000]}\"\"\"
+
+    MARK SCHEME:
+    \"\"\"{mark_scheme_text[:50000]}\"\"\"
+    """
+    system_prompt = "You are an expert UK exam board question paper parser. Output only valid JSON, no commentary."
+
+    best: List[Dict[str, Any]] = []
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        res = await call_llm(prompt, temperature=0.1 + 0.2 * (attempt - 1), system_prompt=system_prompt)
+        try:
+            data = json.loads(res)
+            raw_questions = data.get("questions", [])
+            if not isinstance(raw_questions, list):
+                raw_questions = []
+
+            cleaned = []
+            for q in raw_questions:
+                if not isinstance(q, dict):
+                    continue
+                number = q.get("question_number")
+                text = q.get("question_text")
+                if not number or not text:
+                    continue
+                try:
+                    mark_val = max(1, int(q.get("mark_value", 1)))
+                except (TypeError, ValueError):
+                    mark_val = 1
+                try:
+                    page = max(1, int(q.get("page", 1)))
+                except (TypeError, ValueError):
+                    page = 1
+                cleaned.append({
+                    "number": str(number).strip(),
+                    "text": str(text).strip(),
+                    "mark_value": mark_val,
+                    "page": page,
+                    "mark_scheme_text": str(q.get("mark_scheme_text") or "").strip()
+                })
+
+            if len(cleaned) > len(best):
+                best = cleaned
+        except Exception as e:
+            print(f"AI question splitting attempt {attempt}/{max_attempts} failed to parse: {type(e).__name__}: {e}")
+
+        # A real paper virtually never has fewer than ~5 questions; a
+        # low/empty count is the model declining rather than a genuinely
+        # short paper, so keep retrying. Stop early once we have a
+        # plausible result.
+        if len(best) >= 5:
+            break
+
+    if not best:
+        print("AI question splitting: all attempts returned no usable questions, falling back to regex")
+    return best
+
 async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_scheme: str) -> str:
     """
     §3.1 Deterministic DSL Compilation for 1-2 mark questions.
@@ -303,12 +400,25 @@ async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_s
     fallback = f"CONTAIN:{question_text.split()[-1]}"
     try:
         data = json.loads(res)
-        dsl = data.get("marking_dsl", fallback)
+        dsl = data.get("marking_dsl", fallback) if isinstance(data, dict) else data
         return _coerce_dsl_to_string(dsl, fallback)
     except Exception:
         # Fallback to keyword from mark scheme
         first_key = [w for w in re.findall(r'\b[a-zA-Z]{4,}\b', mark_scheme) if w.lower() not in {'allow', 'accept', 'marks', 'ignore'}][:1]
         return f"CONTAIN:{first_key[0]}" if first_key else "CONTAIN:correct"
+
+def _extract_list(data: Any, key: str) -> List[Any]:
+    """
+    Models don't reliably follow an instructed {key: [...]} wrapper shape -
+    sometimes they return a bare JSON array instead. Accept either rather
+    than crashing on data.get() when data turns out to be a list.
+    """
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        val = data.get(key, [])
+        return val if isinstance(val, list) else []
+    return []
 
 def _coerce_dsl_to_string(dsl: Any, fallback: str) -> str:
     """
@@ -351,16 +461,16 @@ async def scan_examiner_report_for_misconceptions(report_text: str, spec_code: s
     \"\"\"{report_text[:4000]}\"\"\"
 
     Extract recurring candidate mistakes, conceptual confusions, and traps.
-    Output JSON list of proposed tags with:
-    - tag_id (snake_case, e.g. confuses_mitosis_meiosis)
-    - label (Human readable title)
-    - description (Precise description of student misconception)
-    - spec_code ({spec_code})
+    Output ONLY a flat JSON object with exactly this shape (field names must
+    match exactly - do not rename or add fields):
+    {{"proposed_tags": [
+        {{"tag_id": "<snake_case_id, e.g. confuses_mitosis_meiosis>", "label": "<human readable title>", "description": "<precise description of the misconception>", "spec_code": "{spec_code}"}}
+    ]}}
     """
     res = await call_llm(prompt, temperature=0.2)
     try:
         data = json.loads(res)
-        return data.get("proposed_tags", [])
+        return _extract_list(data, "proposed_tags")
     except Exception:
         return [
             {
@@ -394,19 +504,30 @@ async def generate_and_validate_synthetic_answers(
     2. Partial marks ({max(1, mark_value // 2)}/{mark_value})
     3. Zero marks (0/{mark_value}) with realistic misconception.
 
-    Output JSON list of synthetic_answers.
+    Output ONLY a flat JSON object with exactly this shape (field names must
+    match exactly - do not rename or add fields):
+    {{"synthetic_answers": [
+        {{"target_marks": {mark_value}, "answer": "<realistic student answer text>"}},
+        {{"target_marks": {max(1, mark_value // 2)}, "answer": "<realistic student answer text>"}},
+        {{"target_marks": 0, "answer": "<realistic student answer text>"}}
+    ]}}
     """
     res = await call_llm(prompt, temperature=0.4)
     accepted_examples = []
     
     try:
         data = json.loads(res)
-        candidates = data.get("synthetic_answers", [])
-        
+        candidates = _extract_list(data, "synthetic_answers")
+
         for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
             # Independent blind auto-grading check
-            target = cand.get("target_marks", 0)
-            ans = cand.get("answer", "")
+            try:
+                target = int(cand.get("target_marks", 0))
+            except (TypeError, ValueError):
+                target = 0
+            ans = str(cand.get("answer", ""))
             
             # Simple keyword overlap validation
             points = [p.strip() for p in mark_scheme.split("\n") if p.strip()]

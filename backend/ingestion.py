@@ -63,49 +63,79 @@ async def run_full_ai_ingestion_pipeline(
             if tables:
                 pipeline_results["tables"].extend(tables)
                 
-    # 5. Question Boundary Detection
-    raw_questions = detect_question_boundaries(full_text)
-    if not raw_questions:
-        raw_questions = [{"number": "1(a)", "text": full_text[:400] if full_text else "Sample Question"}]
-        
-    # 6. Parse Mark Scheme (if provided) & Compile DSL / Context
+    # 6. Parse Mark Scheme (if provided)
     mark_scheme_text = ""
     if mark_scheme_bytes:
         ms_doc = fitz.open(stream=mark_scheme_bytes, filetype="pdf")
         mark_scheme_text = "\n\n".join([ms_doc[i].get_text() for i in range(len(ms_doc))])
-        
+
+    # 5. Question Boundary Detection.
+    # Real exam-board PDFs render question numbers with irregular character
+    # spacing that regex can't reliably parse (verified: 2/25+ questions
+    # found on a real AQA paper). Prefer AI-driven joint splitting, which
+    # also isolates each question's own mark scheme text rather than the
+    # whole document; fall back to regex if AI is unavailable/fails.
+    ai_questions = await ai_pipeline.split_paper_into_questions(full_text_pages, mark_scheme_text)
+    using_ai_split = bool(ai_questions)
+    if using_ai_split:
+        raw_questions = ai_questions
+    else:
+        raw_questions = detect_question_boundaries(full_text)
+    if not raw_questions:
+        raw_questions = [{"number": "1(a)", "text": full_text[:400] if full_text else "Sample Question"}]
+
+    prev_page = 1
     for idx, q in enumerate(raw_questions):
-        # Extract mark value from text (e.g. [3 marks], [1 mark])
-        mark_match = re.search(r'\[(\d+)\s*marks?\]', q["text"], re.IGNORECASE)
-        mark_val = int(mark_match.group(1)) if mark_match else (2 if idx % 2 == 0 else 4)
+        if using_ai_split:
+            mark_val = q["mark_value"]
+            q_page = q["page"]
+            per_question_scheme = q.get("mark_scheme_text") or ""
+        else:
+            # Extract mark value from text (e.g. [3 marks], [1 mark])
+            mark_match = re.search(r'\[(\d+)\s*marks?\]', q["text"], re.IGNORECASE)
+            mark_val = int(mark_match.group(1)) if mark_match else (2 if idx % 2 == 0 else 4)
+            q_page = None
+            per_question_scheme = ""
+
         marking_type = "dsl" if mark_val <= 2 else "ai"
-        
-        # Link stem images
-        q_images = extracted_images[:1] if extracted_images else []
-        
+
+        # Link images: page-aware when we have AI-assigned page numbers
+        # (catches both same-page diagrams and shared stem diagrams
+        # introduced on an earlier page since the previous question);
+        # otherwise fall back to the old "first image" placeholder.
+        if q_page is not None:
+            q_images = [img for img in extracted_images if prev_page <= img.get("page", 0) <= q_page]
+            prev_page = q_page
+        else:
+            q_images = extracted_images[:1] if extracted_images else []
+
+        # Prefer the AI-isolated per-question mark scheme; fall back to the
+        # whole document's mark scheme text if isolation didn't yield one.
+        question_mark_scheme = per_question_scheme or mark_scheme_text
+
         # Compile Deterministic DSL for 1-2 mark questions
         dsl = None
         if marking_type == "dsl":
-            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(q["text"], mark_val, mark_scheme_text or q["text"])
-            
+            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(q["text"], mark_val, question_mark_scheme or q["text"])
+
         # Synthetic dataset generation for 3+ mark questions (§6.2)
         synthetic_examples = []
         if marking_type == "ai":
             synthetic_examples = await ai_pipeline.generate_and_validate_synthetic_answers(
                 question_text=q["text"],
                 mark_value=mark_val,
-                mark_scheme=mark_scheme_text or "Award marks for correct scientific reasoning.",
+                mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
                 spec_code=spec_code
             )
             pipeline_results["synthetic_training_dataset"].extend(synthetic_examples)
-            
+
         pipeline_results["questions"].append({
             "question_number": q["number"],
             "mark_value": mark_val,
             "question_text": q["text"],
             "marking_type": marking_type,
             "marking_dsl": dsl,
-            "mark_scheme_text": mark_scheme_text if mark_scheme_text else f"Official mark scheme rubric for Q{q['number']}",
+            "mark_scheme_text": question_mark_scheme if question_mark_scheme else f"Official mark scheme rubric for Q{q['number']}",
             "images": q_images,
             "needs_review": any(img.get("needs_review") for img in q_images)
         })
