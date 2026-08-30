@@ -165,6 +165,11 @@ async def run_full_ai_ingestion_pipeline(
                 mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
                 spec_code=(q.get("topic_spec_code") if using_ai_split else None) or ""
             )
+            # Tag each example with its own question's number so the caller
+            # can resolve it to a question_id once questions are inserted
+            # (this pipeline runs before any DB insert, so no id exists yet).
+            for ex in synthetic_examples:
+                ex["question_number"] = q["number"]
             pipeline_results["synthetic_training_dataset"].extend(synthetic_examples)
 
         pipeline_results["questions"].append({

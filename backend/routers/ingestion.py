@@ -107,15 +107,21 @@ async def upload_paper(
         # confidently classify against a known topic is left uncategorized
         # (spec_topic_id NULL) rather than dumped under one manually-picked
         # fallback topic - needs_review already flags it for admin attention.
+        # Maps a question's own paper-scoped number (e.g. "3(b)(ii)") to its
+        # freshly-assigned id, so the synthetic training examples generated
+        # per-question by the pipeline (step 7 below) can be linked to a
+        # question_id that didn't exist until this insert ran.
+        question_id_by_number: dict[str, str] = {}
         for q in results.get("questions", []):
             question_topic_id = topic_id_by_code.get(q.get("topic_spec_code"))
-            await conn.execute('''
+            question_id = await conn.fetchval('''
                 INSERT INTO questions (
                     paper_id, question_number, mark_value, question_text,
                     images, marking_type, marking_dsl, mark_scheme_text,
                     needs_review, spec_topic_id, answer_type, answer_options
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                RETURNING id
             ''',
                 paper_id, q["question_number"], q["mark_value"], q["question_text"],
                 json.dumps(q.get("images", [])), q["marking_type"], q.get("marking_dsl"),
@@ -123,6 +129,7 @@ async def upload_paper(
                 q.get("answer_type", "written"),
                 json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None
             )
+            question_id_by_number[q["question_number"]] = question_id
 
         # 4. Save Proposed Misconceptions (§6.2a). Each is already classified
         # against a known topic by the scanner; misconception_taxonomy.spec_code
@@ -133,6 +140,27 @@ async def upload_paper(
                 VALUES ($1, $2, $3, $4, NULL)
                 ON CONFLICT (spec_code, tag_id) DO NOTHING
             ''', pm.get("spec_code"), pm.get("tag_id"), pm.get("label"), pm.get("description"))
+
+        # 5. Persist Synthetic Training Examples (§6.2). Generated per-question
+        # by the pipeline before any id existed; resolved here via the number
+        # map built above. An example whose question failed to insert (should
+        # not happen, but the map lookup is the guard) is silently skipped
+        # rather than raising, so one bad number can't fail the whole upload.
+        for te in results.get("synthetic_training_dataset", []):
+            question_id = question_id_by_number.get(te.get("question_number"))
+            if not question_id:
+                continue
+            await conn.execute('''
+                INSERT INTO training_examples (
+                    question_id, spec_code, candidate_answer, target_marks,
+                    awarded_marks, is_accepted_for_training
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+            ''',
+                question_id, te.get("spec_code") or None, te.get("student_answer", ""),
+                te.get("target_marks", 0), te.get("awarded_marks", 0),
+                bool(te.get("is_accepted_for_training", False))
+            )
 
     return {
         "message": "AI Pipeline completed successfully. Paper queued for admin review.",
