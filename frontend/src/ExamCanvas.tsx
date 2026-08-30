@@ -1,9 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import api, { extractErrorMessage } from './api';
 import type { Question, AnswerOption, GridRow } from './types';
 import { formatUnits, formatBullets } from './formatUnits';
+import MathInput from './MathInput';
 
 function parseJsonMaybe<T>(value: T | string | null | undefined, fallback: T): T {
   if (value == null) return fallback;
@@ -14,7 +18,9 @@ function parseJsonMaybe<T>(value: T | string | null | undefined, fallback: T): T
 function Markdown({ children }: { children: string }) {
   return (
     <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{formatBullets(formatUnits(children))}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+        {formatBullets(formatUnits(children))}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -534,29 +540,24 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               </div>
             )}
 
-            {/* Numeric answer */}
+            {/* Numeric / algebraic answer */}
             {!markingResult && answerType === 'numeric' && (
-              <div style={{ marginBottom: '1.5rem', fontFamily: 'sans-serif', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <input
-                  type="number"
-                  inputMode="decimal"
+              <div style={{ marginBottom: '0.5rem', fontFamily: 'sans-serif', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <MathInput
                   value={answerText}
-                  onChange={(e) => setAnswerTexts(prev => ({ ...prev, [qid]: e.target.value }))}
+                  onChange={(plain) => setAnswerTexts(prev => ({ ...prev, [qid]: plain }))}
                   placeholder="Enter your answer"
-                  style={{
-                    fontSize: '1.15rem',
-                    padding: '0.6rem 0.9rem',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    width: '220px',
-                    fontFamily: "'Crimson Pro', 'Georgia', serif"
-                  }}
                 />
                 {(answerOptions as { unit: string | null } | undefined)?.unit && (
                   <span style={{ color: '#475569', fontWeight: 600 }}>
                     {formatUnits((answerOptions as { unit: string }).unit)}
                   </span>
                 )}
+              </div>
+            )}
+            {!markingResult && answerType === 'numeric' && (
+              <div style={{ marginBottom: '1rem', fontSize: '0.8rem', color: '#94a3b8', fontFamily: 'sans-serif' }}>
+                Use ^ for powers (x^2), / for fractions, and type sqrt for a square root.
               </div>
             )}
 

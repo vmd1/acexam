@@ -579,7 +579,9 @@ async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_s
     - NOT CONTAIN:term
     - ANY:term1,term2,term3 (synonyms)
     - ALL:term1,term2 (all required)
-    - EXACT:value (exact number)
+    - EXACT:value (exact number, fraction like 3/4, index like 2^3, or algebraic
+      expression like x^2+2x+1 or (x+2)/(x-3) - compared symbolically, so any
+      equivalent/unsimplified form the student writes is accepted)
     - RANGE:min,max (numerical tolerance)
     - Boolean AND / OR logic
 

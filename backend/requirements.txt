@@ -11,3 +11,4 @@ email-validator
 PyMuPDF
 pdfplumber
 Pillow
+sympy

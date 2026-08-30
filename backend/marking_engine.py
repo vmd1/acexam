@@ -1,7 +1,65 @@
 import re
 import json
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+import sympy
+from sympy.parsing.sympy_parser import (
+    parse_expr,
+    standard_transformations,
+    implicit_multiplication_application,
+    convert_xor,
+)
 import ai_pipeline
+
+# Only plain arithmetic/algebra characters are allowed through to sympy's parser.
+# This blocks quotes, brackets, underscores etc. that could otherwise be used to
+# reach Python builtins via sympy's eval-based expression parser.
+_SAFE_MATH_RE = re.compile(r'^[0-9a-zA-Z\.\,\+\-\*\/\^\(\)\s]{1,200}$')
+_MATH_TRANSFORMS = standard_transformations + (implicit_multiplication_application, convert_xor)
+
+
+def _safe_math_globals() -> Dict[str, Any]:
+    # Explicitly neuter builtins and only expose a small set of safe sympy names,
+    # since eval() re-adds __builtins__ automatically if the key is absent.
+    return {
+        '__builtins__': {},
+        'sqrt': sympy.sqrt,
+        'pi': sympy.pi,
+        'Rational': sympy.Rational,
+        'Integer': sympy.Integer,
+        'Float': sympy.Float,
+        'Symbol': sympy.Symbol,
+    }
+
+
+def _parse_math_expr(s: str) -> Optional[sympy.Expr]:
+    """Safely parse a numeric/algebraic expression (fractions, indices, quadratics,
+    algebraic fractions) for symbolic/numeric comparison. Returns None if the
+    string isn't a well-formed math expression."""
+    s = s.strip()
+    if not s or not _SAFE_MATH_RE.match(s):
+        return None
+    try:
+        return parse_expr(
+            s,
+            transformations=_MATH_TRANSFORMS,
+            global_dict=_safe_math_globals(),
+            evaluate=True,
+        )
+    except Exception:
+        return None
+
+
+def _extract_numeric_candidates(raw_ans: str) -> List[float]:
+    """Numbers to compare against a target value: prefer evaluating the whole
+    answer as a math expression (so fractions like '3/4' or '2^3' resolve
+    correctly), falling back to the legacy digit-scraping regex for free text."""
+    expr = _parse_math_expr(raw_ans)
+    if expr is not None and expr.is_number:
+        try:
+            return [float(expr.evalf())]
+        except Exception:
+            pass
+    return [float(n) for n in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", raw_ans)]
 
 def evaluate_dsl_expression(dsl: str, student_answer: str) -> Tuple[bool, str]:
     """
@@ -30,7 +88,7 @@ def evaluate_dsl_expression(dsl: str, student_answer: str) -> Tuple[bool, str]:
             if _is_balanced(expr[1:-1]):
                 return eval_expr(expr[1:-1])
                 
-        passed, _ = _eval_single_clause(expr.strip("()"), clean_ans, raw_ans)
+        passed, _ = _eval_single_clause(expr, clean_ans, raw_ans)
         return passed
 
     def _split_top_level(s: str, operator: str) -> List[str]:
@@ -99,19 +157,31 @@ def _eval_single_clause(clause: str, clean_ans: str, raw_ans: str) -> Tuple[bool
         return passed, f"Missing required terms: {', '.join(missing)}" if not passed else ""
         
     elif op == "EXACT":
+        # Symbolic/numeric equivalence first: handles fractions ("3/4"), indices
+        # ("2^3"), and algebraic expressions like quadratics or algebraic
+        # fractions ("(x+2)/(x-3)") regardless of how they're arranged/simplified.
+        target_expr = _parse_math_expr(val)
+        given_expr = _parse_math_expr(raw_ans)
+        if target_expr is not None and given_expr is not None:
+            try:
+                diff = sympy.simplify(sympy.expand(target_expr - given_expr))
+                if diff == 0 or (diff.is_number and abs(complex(diff.evalf())) < 1e-6):
+                    return True, ""
+            except Exception:
+                pass
         try:
             val_num = float(val)
-            nums = [float(n) for n in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", raw_ans)]
+            nums = _extract_numeric_candidates(raw_ans)
             passed = any(abs(n - val_num) < 1e-5 for n in nums)
             return passed, f"Expected exact value {val}" if not passed else ""
         except Exception:
             passed = clean_ans == val.lower()
             return passed, f"Expected '{val}'" if not passed else ""
-            
+
     elif op == "RANGE":
         try:
             parts = [float(p.strip()) for p in val.split(",")]
-            nums = [float(n) for n in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", raw_ans)]
+            nums = _extract_numeric_candidates(raw_ans)
             passed = any(parts[0] <= n <= parts[1] for n in nums)
             return passed, f"Value must be between {parts[0]} and {parts[1]}" if not passed else ""
         except Exception:
