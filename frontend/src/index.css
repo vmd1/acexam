@@ -438,6 +438,13 @@ p.subtitle {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: var(--space-8);
+  /* .card is also applied to <button> elements (e.g. the subject picker
+     cards in PracticeSetup) - without this they fall back to the browser's
+     default ButtonText color (black) instead of the theme, unreadable in
+     dark mode. */
+  color: var(--text-primary);
+  font: inherit;
+  text-align: inherit;
 }
 
 /* Forms */
