@@ -5,7 +5,9 @@ import api, { extractErrorMessage } from './api';
 import AdminIngestion from './AdminIngestion';
 import AdminReview from './AdminReview';
 import PracticeSetup from './PracticeSetup';
+import CustomPapers from './CustomPapers';
 import PracticeSession from './PracticeSession';
+import AdminManageSubjects from './AdminManageSubjects';
 import AnalyticsView from './AnalyticsView';
 import ManageAccount from './ManageAccount';
 import Onboarding from './Onboarding';
@@ -111,11 +113,13 @@ function AppShell() {
           <Route path="/register" element={<Register />} />
           <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
           <Route path="/app" element={<RequireSubjects><PracticeSetup /></RequireSubjects>} />
+          <Route path="/app/custom-papers" element={<RequireSubjects><CustomPapers /></RequireSubjects>} />
           <Route path="/app/session" element={<RequireSubjects><PracticeSession /></RequireSubjects>} />
           <Route path="/analytics" element={<RequireSubjects><AnalyticsView /></RequireSubjects>} />
           <Route path="/account" element={<ProtectedRoute><ManageAccount /></ProtectedRoute>} />
           <Route path="/admin/ingestion" element={<AdminRoute><AdminIngestion /></AdminRoute>} />
           <Route path="/admin/review" element={<AdminRoute><AdminReview /></AdminRoute>} />
+          <Route path="/admin/subjects" element={<AdminRoute><AdminManageSubjects /></AdminRoute>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

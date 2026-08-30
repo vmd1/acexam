@@ -45,6 +45,7 @@ interface CustomSessionState {
   mode: 'custom';
   subject: string;
   examBoard: string;
+  level: string;
   topicIds: string[];
 }
 
@@ -90,8 +91,8 @@ export default function PracticeSession() {
         const res = await api.post('/generate/custom-paper', {
           subject: sessionConfig.subject,
           exam_board: sessionConfig.examBoard,
+          level: sessionConfig.level,
           spec_topic_ids: sessionConfig.topicIds,
-          target_marks: 20,
         });
         setQuestions(res.data.questions);
         setFocusReason(null);

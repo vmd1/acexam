@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from database import init_db, close_db
-from routers import auth, exams, generate, feedback, analytics, ingestion
+from routers import auth, exams, generate, feedback, analytics, ingestion, qualifications
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,6 +17,7 @@ app.include_router(generate.router, prefix="/api/generate", tags=["generate"])
 app.include_router(feedback.router, prefix="/api/feedback", tags=["feedback"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(ingestion.router, prefix="/api/admin/ingestion", tags=["ingestion"])
+app.include_router(qualifications.router, prefix="/api/admin/qualifications", tags=["qualifications"])
 
 from fastapi.staticfiles import StaticFiles
 import os

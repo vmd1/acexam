@@ -18,11 +18,13 @@ def _question_root(question_number: str) -> str:
     return match.group(1) if match else (question_number or '')
 
 
-async def _expand_to_full_groups(conn, rows, max_groups):
+async def _expand_to_full_groups(conn, rows, max_groups=None):
     """Given candidate question rows (possibly only some sub-parts of a
     multi-part question, since candidates are filtered per-row by topic),
     fetch every sibling sub-question sharing the same paper + stem number so
-    a group is never served with its earlier parts missing."""
+    a group is never served with its earlier parts missing. max_groups=None
+    expands every distinct group present in rows (used when the caller
+    trims to a mark target afterwards instead of a fixed group count)."""
     seen_keys = []
     key_set = set()
     for r in rows:
@@ -30,7 +32,7 @@ async def _expand_to_full_groups(conn, rows, max_groups):
         if key not in key_set:
             key_set.add(key)
             seen_keys.append(key)
-        if len(seen_keys) >= max_groups:
+        if max_groups is not None and len(seen_keys) >= max_groups:
             break
 
     if not seen_keys:
@@ -97,6 +99,72 @@ async def _drop_groups_with_attempted_siblings(conn, user_id, rows):
     return [r for r in rows if (r['paper_id'], _question_root(r['question_number'])) not in tainted_groups]
 
 
+def _trim_groups_to_target_marks(rows, target_marks):
+    """Keeps whole (paper_id, root) groups, in the order they already
+    appear, accumulating mark_value until the running total reaches
+    target_marks - the group that crosses the threshold is kept in full
+    (a paper should never cut a question in half), so the final total can
+    slightly overshoot the target but never stops mid-question. Stops
+    early if the candidate pool runs out first (a small bank just gives
+    everything it has, same best-effort philosophy as the adaptive queue's
+    fallback). target_marks=None returns rows unchanged."""
+    if target_marks is None or not rows:
+        return rows
+
+    order = []
+    seen = set()
+    marks_by_key = {}
+    rows_by_key = {}
+    for r in rows:
+        key = (r['paper_id'], _question_root(r['question_number']))
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+            marks_by_key[key] = 0
+            rows_by_key[key] = []
+        marks_by_key[key] += r['mark_value']
+        rows_by_key[key].append(r)
+
+    kept_keys = []
+    running = 0
+    for key in order:
+        if running >= target_marks:
+            break
+        kept_keys.append(key)
+        running += marks_by_key[key]
+
+    result = []
+    for key in kept_keys:
+        result.extend(rows_by_key[key])
+    return result
+
+
+def _renumber_for_custom_paper(rows):
+    """A custom paper is stitched together from questions scattered across
+    the bank, so their original question_numbers (e.g. "07.1", "03.2")
+    read as out-of-order noise once reassembled - a real paper numbers
+    sequentially from 1. Renumbers each group to its position in THIS
+    paper while preserving each sub-question's own suffix (the ".2" /
+    "(b)(ii)" part after the leading digits), so a multi-part stem still
+    reads as one connected question, just under its new position."""
+    if not rows:
+        return rows
+    root_to_new = {}
+    for r in rows:
+        key = (r['paper_id'], _question_root(r['question_number']))
+        if key not in root_to_new:
+            root_to_new[key] = str(len(root_to_new) + 1)
+
+    renumbered = []
+    for r in rows:
+        d = dict(r)
+        key = (r['paper_id'], _question_root(r['question_number']))
+        suffix = ROOT_NUMBER_RE.sub('', d['question_number'] or '', count=1)
+        d['question_number'] = f"{root_to_new[key]}{suffix}"
+        renumbered.append(d)
+    return renumbered
+
+
 async def _attach_previous_answers(conn, user_id, rows):
     """Attach each question's most recent answer (if any) so the frontend
     can prefill/review what the student already submitted, instead of
@@ -130,8 +198,16 @@ async def _attach_previous_answers(conn, user_id, rows):
 class CustomPaperRequest(BaseModel):
     subject: Optional[str] = "Biology"
     exam_board: Optional[str] = "AQA"
+    level: Optional[str] = "GCSE"
     spec_topic_ids: Optional[List[str]] = []
-    target_marks: Optional[int] = 20
+
+# Used when this (exam_board, level, subject) has no admin-configured
+# custom_paper_target_marks yet (Manage Subjects, §qualifications).
+DEFAULT_CUSTOM_PAPER_TARGET_MARKS = 20
+# ~1 minute per mark is the standard GCSE exam-technique rule of thumb,
+# used only when there's no configured custom_paper_time_limit_minutes.
+DEFAULT_SECONDS_PER_MARK = 60
+MIN_CUSTOM_PAPER_TIME_LIMIT_SECONDS = 600
 
 @router.get("/adaptive-queue")
 async def get_adaptive_queue(
@@ -258,12 +334,23 @@ async def generate_custom_paper(
         # same as Foundation here (excludes tier-restricted content) since
         # that's the safer default.
         student_tier = await conn.fetchval(
-            'SELECT tier FROM user_subjects WHERE user_id = $1 AND exam_board = $2 AND subject = $3 LIMIT 1',
-            user_id, req.exam_board, req.subject
+            'SELECT tier FROM user_subjects WHERE user_id = $1 AND exam_board = $2 AND subject = $3 AND level = $4 LIMIT 1',
+            user_id, req.exam_board, req.subject, req.level
         )
 
-        conditions = [NOT_ATTEMPTED_SQL, "p.status = 'published'", "p.subject = $2"]
-        params = [user_id, req.subject]
+        # Admin-configured mark total/time limit for this qualification
+        # (Manage Subjects, §qualifications) - falls back to the previous
+        # heuristics when nothing's been configured for it yet.
+        qualification = await conn.fetchrow(
+            '''SELECT custom_paper_target_marks, custom_paper_time_limit_minutes
+               FROM qualifications WHERE exam_board = $1 AND level = $2 AND subject = $3''',
+            req.exam_board, req.level, req.subject
+        )
+        target_marks = (qualification['custom_paper_target_marks'] if qualification else None) or DEFAULT_CUSTOM_PAPER_TARGET_MARKS
+        configured_time_limit_minutes = qualification['custom_paper_time_limit_minutes'] if qualification else None
+
+        conditions = [NOT_ATTEMPTED_SQL, "p.status = 'published'", "p.subject = $2", "p.level = $3"]
+        params = [user_id, req.subject, req.level]
 
         if req.exam_board:
             params.append(req.exam_board)
@@ -276,6 +363,9 @@ async def generate_custom_paper(
         params.append(student_tier)
         conditions.append(f"(st.tier_only IS NULL OR st.tier_only = ${len(params)})")
 
+        # A generous candidate pool, not a fixed question count - how much
+        # of it actually gets used is decided by _trim_groups_to_target_marks
+        # below, against the qualification's real mark total.
         query = f'''
             SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
             FROM questions q
@@ -283,18 +373,21 @@ async def generate_custom_paper(
             LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
             WHERE {' AND '.join(conditions)}
             ORDER BY RANDOM()
-            LIMIT 10
+            LIMIT 200
         '''
 
         questions = await conn.fetch(query, *params)
         # _expand_to_full_groups mirrors the adaptive queue's grouping rules
-        # exactly (same helper, same max_groups) so a stem never renders
-        # with early sub-parts missing - then, unlike the adaptive queue,
-        # drop any whole group an expansion pulled an attempted sibling into,
-        # since this is meant to read as a fresh paper, not a revision drill.
-        questions = await _expand_to_full_groups(conn, questions, max_groups=6)
+        # exactly (same helper) so a stem never renders with early sub-parts
+        # missing. No group-count cap here (unlike the adaptive queue) -
+        # _trim_groups_to_target_marks decides how much to keep, by marks.
+        questions = await _expand_to_full_groups(conn, questions)
         questions = await _drop_groups_with_attempted_siblings(conn, user_id, questions)
+        questions = _trim_groups_to_target_marks(questions, target_marks)
         questions = await _attach_previous_answers(conn, user_id, questions)
+        # Renumber last - grouping/trimming above all key off the original
+        # question_number, so it must stay untouched until they're done.
+        questions = _renumber_for_custom_paper(questions)
 
         attempt_id = await conn.fetchval('''
             INSERT INTO attempts (user_id, paper_id, source)
@@ -302,16 +395,17 @@ async def generate_custom_paper(
             RETURNING id
         ''', user_id)
 
-        # ~1 minute per mark is the standard GCSE exam-technique rule of
-        # thumb (matches real papers' own allowances closely enough, e.g.
-        # AQA Combined Science 1h15/70 marks), with a floor so a thin
-        # selection still gets a sane minimum timer.
         total_marks = sum(q['mark_value'] for q in questions)
-        time_limit_seconds = max(total_marks * 60, 600)
+        if configured_time_limit_minutes:
+            time_limit_seconds = configured_time_limit_minutes * 60
+        else:
+            time_limit_seconds = max(total_marks * DEFAULT_SECONDS_PER_MARK, MIN_CUSTOM_PAPER_TIME_LIMIT_SECONDS)
 
         return {
             "attempt_id": str(attempt_id),
             "title": f"Custom {req.subject} Mock Paper",
             "questions": questions,
+            "total_marks": total_marks,
+            "target_marks": target_marks,
             "time_limit_seconds": time_limit_seconds
         }

@@ -2,9 +2,11 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   GraduationCap,
   ClipboardList,
+  FileEdit,
   LineChart,
   UploadCloud,
   ShieldCheck,
+  Settings,
   LogOut,
   Sun,
   Moon,
@@ -33,10 +35,12 @@ function useNavItems(): NavItem[] {
   const items: NavItem[] = [
     { to: '/app', label: 'Practice', icon: <ClipboardList size={20} /> },
   ];
+  if (user) items.push({ to: '/app/custom-papers', label: 'Custom Papers', icon: <FileEdit size={20} /> });
   if (user) items.push({ to: '/analytics', label: 'Analytics', icon: <LineChart size={20} /> });
   if (user?.is_admin) {
     items.push({ to: '/admin/ingestion', label: 'Upload paper', icon: <UploadCloud size={20} /> });
     items.push({ to: '/admin/review', label: 'Admin console', icon: <ShieldCheck size={20} /> });
+    items.push({ to: '/admin/subjects', label: 'Manage Subjects', icon: <Settings size={20} /> });
   }
   return items;
 }
