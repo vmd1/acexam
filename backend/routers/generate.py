@@ -146,13 +146,23 @@ async def get_adaptive_queue(
         
         # Fetch matching questions or fallback to general bank. Questions the
         # student has already scored full marks on are excluded so a
-        # mastered question is never served again.
+        # mastered question is never served again. Also excludes questions
+        # under a Higher-tier-only topic when the student is Foundation tier
+        # for that subject (or their tier for it is unknown) -- specs merge
+        # both tiers into one document and flag some content as HT-only, see
+        # spec_topics.tier_only.
+        TIER_JOIN_SQL = '''LEFT JOIN user_subjects us
+            ON us.user_id = $1 AND us.exam_board = p.exam_board
+            AND us.subject = p.subject AND us.level = p.level'''
+        TIER_FILTER_SQL = '(st.tier_only IS NULL OR st.tier_only = us.tier)'
+
         query = f'''
             SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
             FROM questions q
             JOIN papers p ON q.paper_id = p.id
             LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
-            WHERE {MASTERY_EXCLUSION_SQL}
+            {TIER_JOIN_SQL}
+            WHERE p.status = 'published' AND {MASTERY_EXCLUSION_SQL} AND {TIER_FILTER_SQL}
         '''
 
         conditions = []
@@ -175,7 +185,8 @@ async def get_adaptive_queue(
                 FROM questions q
                 JOIN papers p ON q.paper_id = p.id
                 LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
-                WHERE {MASTERY_EXCLUSION_SQL}
+                {TIER_JOIN_SQL}
+                WHERE p.status = 'published' AND {MASTERY_EXCLUSION_SQL} AND {TIER_FILTER_SQL}
                 ORDER BY RANDOM()
                 LIMIT 10
             ''', user_id)
@@ -208,7 +219,18 @@ async def generate_custom_paper(
         raise HTTPException(status_code=500, detail="Internal server error")
         
     async with db.acquire() as conn:
-        conditions = [MASTERY_EXCLUSION_SQL, "p.subject = $2"]
+        # The student's tier for this subject (if any) - a tiered GCSE spec
+        # merges Higher and Foundation content into one document and flags
+        # some topics as Higher-only (spec_topics.tier_only), so Foundation
+        # students must never be served those. Unknown tier is treated the
+        # same as Foundation here (excludes tier-restricted content) since
+        # that's the safer default.
+        student_tier = await conn.fetchval(
+            'SELECT tier FROM user_subjects WHERE user_id = $1 AND exam_board = $2 AND subject = $3 LIMIT 1',
+            user_id, req.exam_board, req.subject
+        )
+
+        conditions = [MASTERY_EXCLUSION_SQL, "p.status = 'published'", "p.subject = $2"]
         params = [user_id, req.subject]
 
         if req.exam_board:
@@ -218,6 +240,9 @@ async def generate_custom_paper(
         if req.spec_topic_ids:
             params.append(req.spec_topic_ids)
             conditions.append(f"q.spec_topic_id = ANY(${len(params)})")
+
+        params.append(student_tier)
+        conditions.append(f"(st.tier_only IS NULL OR st.tier_only = ${len(params)})")
 
         query = f'''
             SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title

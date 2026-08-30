@@ -304,7 +304,7 @@ async def generate_dual_image_descriptions(image_dict: Dict[str, Any]) -> Tuple[
     is_agreed = jaccard_score >= 0.65
     return desc_a_text, desc_b_text, is_agreed, round(jaccard_score, 3)
 
-VALID_ANSWER_TYPES = {"written", "select", "multi_select", "numeric", "grid_select"}
+VALID_ANSWER_TYPES = {"written", "select", "multi_select", "numeric", "grid_select", "practical"}
 
 def _clean_answer_type_and_options(raw_type: Any, raw_options: Any) -> Tuple[str, Optional[Any]]:
     """
@@ -316,8 +316,8 @@ def _clean_answer_type_and_options(raw_type: Any, raw_options: Any) -> Tuple[str
     if answer_type not in VALID_ANSWER_TYPES:
         answer_type = "written"
 
-    if answer_type == "written":
-        return "written", None
+    if answer_type in ("written", "practical"):
+        return answer_type, None
 
     if answer_type in ("select", "multi_select"):
         if not isinstance(raw_options, list) or not raw_options:
@@ -421,11 +421,19 @@ async def split_paper_into_questions(
     - topic_spec_code: the specification code (from the list below, if provided) that this question is testing.
       Use null if no topic list is given or none of them fit.
     - answer_type: how the student should answer, one of:
-        * "written" - free text / prose / calculation working (the default for Explain/Describe/Evaluate/Calculate questions)
+        * "written" - free text / prose (the default for Explain/Describe/Evaluate questions, and for a
+          Calculate question that also asks the student to explain their reasoning or where multiple
+          working methods could reach different acceptable answers)
         * "select" - a single choice from a fixed list (e.g. "Tick one box")
         * "multi_select" - more than one choice from a fixed list (e.g. "Tick two boxes")
-        * "numeric" - the answer is just one number (a calculation result), optionally with a unit
+        * "numeric" - a Calculate question whose mark scheme awards marks for one final numeric result
+          (optionally with a unit), even if working must be shown on the real paper - grade only the
+          final answer, so use this whenever the mark scheme states a single correct value/range
         * "grid_select" - one choice per row/statement (e.g. "Tick True or False for each row" against a list of statements)
+        * "practical" - the answer is drawn/marked directly onto the paper itself, not typed (e.g. "Draw a line
+          to complete the graph", "Complete the diagram", "Plot the points and draw a line of best fit",
+          "Label the diagram", "Sketch the graph you would expect") - there's nothing meaningful for a student
+          to type, so this bypasses typed answer collection entirely
       Choose "written" whenever unsure - only use the others when the question clearly fits.
     - answer_options: required only for select/multi_select/numeric/grid_select, else null:
         * select or multi_select: a list of {{"key": "A", "text": "<option text>"}} (or {{"key": "<option text>", "text": "<option text>"}} if unlettered)
@@ -505,16 +513,33 @@ async def split_paper_into_questions(
         print("AI question splitting: all attempts returned no usable questions, falling back to regex")
     return best
 
-async def extract_spec_topics_from_text(spec_text: str) -> List[Dict[str, Any]]:
+async def extract_spec_topics_from_text(spec_text: str) -> Dict[str, Any]:
     """
     Parses an official exam board specification document into its full
     topic hierarchy, so an admin can pre-populate spec_topics ahead of
     ingesting any past papers rather than typing topic codes by hand.
 
-    Returns a flat list of {spec_code, title, parent_spec_code} - one entry
-    per numbered specification section/sub-section - so the caller can
-    resolve parent_id by matching parent_spec_code against another entry's
-    spec_code. Returns [] on failure.
+    Also extracts which tiers (e.g. Higher/Foundation) the specification
+    states it's assessed at, if any - a real spec document states this
+    outright, so there's no need for a manual admin-facing tier field.
+
+    Returns {"topics": [...], "tiers": [...], "exam_board": ..., "subject": ...,
+    "level": ...}, where "topics" is a flat list of {spec_code, title,
+    parent_spec_code, tier_only} - one entry per numbered specification
+    section/sub-section - so the caller can resolve parent_id by matching
+    parent_spec_code against another entry's spec_code, and "tiers" is a list
+    of tier names (e.g. ["Higher", "Foundation"]), or [] if the qualification
+    isn't tiered (e.g. most A-Levels, IB, BTEC). A tiered GCSE specification
+    merges Higher and Foundation content into one document and marks certain
+    sections as assessed at one tier only (e.g. "HT only") - tier_only carries
+    that tier name (matching an entry in "tiers") when a section is so marked,
+    or null when the section is common to all tiers (including for untiered
+    qualifications, where it's always null). "exam_board"/"subject"/"level" are
+    read off the document's own cover page/branding rather than admin-typed,
+    mirroring how extract_paper_cover_metadata_from_text derives a paper's own code/series from the
+    paper itself; any of the three may be None if the document doesn't state
+    it clearly.
+    Returns {"topics": [], "tiers": [], "exam_board": None, "subject": None, "level": None} on failure.
     """
     prompt = f"""
     You are given the text of an official UK exam board subject specification document.
@@ -526,10 +551,31 @@ async def extract_spec_topics_from_text(spec_text: str) -> List[Dict[str, Any]]:
     - title: the short title/heading of that section (not the full teaching content underneath it)
     - parent_spec_code: the spec_code of its immediate parent section (e.g. "4.1.2"'s parent is "4.1"),
       or null for a top-level section
+    - tier_only: many GCSE specifications merge Higher and Foundation tier content into one
+      document and mark some sections as assessed at only one tier (look for markers like
+      "HT only", "Higher Tier only", a shaded/highlighted section, or explicit text saying a
+      topic is not required for Foundation tier). If a section is so marked, output the tier
+      name it belongs to exactly as the specification names its tiers (e.g. "Higher"). If the
+      section is common to all tiers (the default - most content is), or the qualification
+      isn't tiered at all, output null.
 
     Ignore front matter (contents pages, assessment objectives, grade boundaries) and appendices.
 
-    Output ONLY a flat JSON object: {{"topics": [{{"spec_code": "...", "title": "...", "parent_spec_code": "..."}}, ...]}}
+    Also determine whether this qualification is tiered - i.e. whether the specification
+    states it is assessed via separate tiers such as "Higher" and "Foundation" (common for
+    GCSEs). If it is, output the tier names exactly as the specification names them (e.g.
+    ["Higher", "Foundation"]). If the qualification is not tiered (e.g. most A-Levels, IB,
+    BTEC), output an empty list.
+
+    Also identify, from the document's cover page / header / footer branding:
+    - exam_board: the awarding body that publishes this specification (e.g. "AQA", "Edexcel", "OCR", "WJEC")
+    - subject: the subject this specification covers (e.g. "Biology", "Chemistry", "Physics", "Combined Science")
+    - level: the qualification level (e.g. "GCSE", "A-Level", "IB", "BTEC")
+
+    Output ONLY a flat JSON object:
+    {{"exam_board": "...", "subject": "...", "level": "...",
+      "topics": [{{"spec_code": "...", "title": "...", "parent_spec_code": "...", "tier_only": "..."}}, ...],
+      "tiers": [...]}}
 
     SPECIFICATION DOCUMENT:
     \"\"\"{spec_text[:100000]}\"\"\"
@@ -541,7 +587,7 @@ async def extract_spec_topics_from_text(spec_text: str) -> List[Dict[str, Any]]:
         data = json.loads(res)
         raw_topics = data.get("topics", [])
         if not isinstance(raw_topics, list):
-            return []
+            return {"topics": [], "tiers": [], "exam_board": None, "subject": None, "level": None}
 
         cleaned = []
         for t in raw_topics:
@@ -552,27 +598,97 @@ async def extract_spec_topics_from_text(spec_text: str) -> List[Dict[str, Any]]:
             if not spec_code or not title:
                 continue
             parent_code = t.get("parent_spec_code")
+            tier_only = t.get("tier_only")
             cleaned.append({
                 "spec_code": str(spec_code).strip(),
                 "title": str(title).strip(),
-                "parent_spec_code": str(parent_code).strip() if parent_code else None
+                "parent_spec_code": str(parent_code).strip() if parent_code else None,
+                "tier_only": str(tier_only).strip() if tier_only else None,
             })
-        return cleaned
+
+        raw_tiers = data.get("tiers", [])
+        tiers = [str(t).strip() for t in raw_tiers if isinstance(t, (str, int, float)) and str(t).strip()] \
+            if isinstance(raw_tiers, list) else []
+
+        def _clean_str(v):
+            return str(v).strip() if isinstance(v, str) and str(v).strip() else None
+
+        return {
+            "topics": cleaned,
+            "tiers": tiers,
+            "exam_board": _clean_str(data.get("exam_board")),
+            "subject": _clean_str(data.get("subject")),
+            "level": _clean_str(data.get("level")),
+        }
     except Exception as e:
         print(f"Specification topic extraction failed to parse: {type(e).__name__}: {e}")
-        return []
+        return {"topics": [], "tiers": [], "exam_board": None, "subject": None, "level": None}
 
-async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_scheme: str) -> str:
+async def extract_paper_cover_metadata_from_text(paper_text: str) -> Dict[str, Optional[str]]:
     """
-    §3.1 Deterministic DSL Compilation for 1-2 mark questions.
-    Uses structured reasoning to output standard DSL operators.
+    Reads the paper's own code and series/session straight off its cover
+    page, so an admin only has to pick the qualification (board/level/
+    subject) and tier - everything the paper itself states is derived here
+    rather than typed into a form.
+
+    Returns {"paper_code": ..., "series": ...}; either may be None if the
+    cover page doesn't state it clearly.
     """
+    prompt = f"""
+    You are given the opening page(s) of a UK exam board question paper.
+
+    Extract, exactly as printed on the cover page:
+    - paper_code: the paper/component code (e.g. "8461/1H", "1BI0/1F")
+    - series: the exam series/session and paper number, in the exam board's own
+      wording (e.g. "June 2023 Paper 1 Higher Tier", "November 2022")
+
+    Output ONLY a flat JSON object: {{"paper_code": "..." or null, "series": "..." or null}}
+
+    PAPER TEXT:
+    \"\"\"{paper_text[:5000]}\"\"\"
+    """
+    system_prompt = "You are an expert UK exam board paper parser. Output only valid JSON, no commentary."
+
+    res = await call_llm(prompt, temperature=0.0, system_prompt=system_prompt)
+    try:
+        data = json.loads(res)
+        paper_code = data.get("paper_code")
+        series = data.get("series")
+        return {
+            "paper_code": str(paper_code).strip() if isinstance(paper_code, str) and paper_code.strip() else None,
+            "series": str(series).strip() if isinstance(series, str) and series.strip() else None,
+        }
+    except Exception as e:
+        print(f"Paper cover metadata extraction failed to parse: {type(e).__name__}: {e}")
+        return {"paper_code": None, "series": None}
+
+async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_scheme: str, answer_type: str = "written") -> str:
+    """
+    §3.1 Deterministic DSL Compilation, for any question gradeable that way
+    (short 1-2 mark answers, or a longer calculation/MCQ/structured-answer
+    question with one deterministic correct value/option regardless of its
+    mark value).
+    """
+    single_value_note = ""
+    if answer_type in ("numeric", "select", "multi_select", "grid_select"):
+        single_value_note = f"""
+    This question's answer field accepts exactly ONE {answer_type} value from the
+    student - not a multi-part written response. AND requires every operand to
+    match that same single value simultaneously, which is impossible whenever the
+    mark scheme lists several different numbers/options as its marking points (e.g.
+    an intermediate reading, an unsimplified expression, and a final answer are
+    three different values - ANDing them together can never be satisfied by any
+    single submission, so the question would always mark as wrong). Use OR between
+    them instead.
+    """
+
     prompt = f"""
     Compile the following UK Exam Board Question & Mark Scheme into Deterministic DSL:
     Question: {question_text}
     Mark Value: {mark_value}
+    Answer type: {answer_type}
     Mark Scheme: {mark_scheme}
-
+    {single_value_note}
     Available DSL Operators:
     - MCQ:OPTION (e.g. MCQ:B)
     - CONTAIN:term (e.g. CONTAIN:mitochondria)
@@ -584,6 +700,33 @@ async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_s
       equivalent/unsimplified form the student writes is accepted)
     - RANGE:min,max (numerical tolerance)
     - Boolean AND / OR logic
+
+    AND means every operand must ALL be true of the one answer the student actually
+    submits - only use it to combine genuinely separate requirements a single written
+    answer must all satisfy (e.g. CONTAIN:oxygen AND CONTAIN:carbon dioxide). Never
+    use AND to join several different numbers/options that are alternative
+    representations of one correct answer (an intermediate working value and the
+    final result are NOT both required in the same submission) - use OR for those,
+    since the student submits only one value and any one accepted form of it is enough.
+
+    A mark scheme's bullet points are often the multiple ways full marks could be
+    reached (e.g. method credit for an intermediate reading, for the unsimplified
+    expression, or for the final computed value) rather than separate simultaneous
+    requirements - when in doubt about whether two mark-scheme values are
+    alternatives or a combined requirement, prefer OR.
+
+    Numeric/algebraic values in EXACT and RANGE are parsed as plain arithmetic,
+    NOT LaTeX - even if the mark scheme itself uses LaTeX (e.g. "$\\frac{{10}}{{43}}$").
+    Never write LaTeX commands, backslashes, `$` delimiters, or `\\frac{{}}{{}}`
+    in a DSL value. Write a fraction as "10/43", not "\\frac{{10}}{{43}}".
+
+    When the mark scheme accepts a value to a stated or implied rounding (e.g. it
+    lists both an exact fraction and a rounded decimal, like "10/43 or 0.23255...
+    or 0.233"), don't rely on EXACT alone for the rounded form - EXACT requires
+    near-exact equality (~1e-6) so a correctly-rounded answer would fail it. Instead
+    combine EXACT for the precise value with a RANGE spanning the accepted rounding
+    tolerance (e.g. "EXACT:10/43 OR RANGE:0.2325,0.2335") so an answer given to
+    the paper's expected significant figures is accepted.
 
     Output ONLY a flat JSON object with exactly one key, "marking_dsl", whose
     value is a single DSL expression string (combine multiple marking points
@@ -646,34 +789,51 @@ def _coerce_dsl_to_string(dsl: Any, fallback: str) -> str:
 
     return fallback
 
-async def scan_examiner_report_for_misconceptions(report_text: str, spec_code: str) -> List[Dict[str, Any]]:
+async def scan_text_for_misconceptions(source_text: str, source_label: str, known_topics: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
-    §6.2a Examiner Report Scanner for Proposing Canonical Misconception Tags.
-    """
-    prompt = f"""
-    Analyze this Examiner Report text for specification {spec_code}:
-    \"\"\"{report_text[:4000]}\"\"\"
+    §6.2a Misconception Scanner for Proposing Canonical Misconception Tags.
 
-    Extract recurring candidate mistakes, conceptual confusions, and traps.
+    Run against either an examiner report (explicit candidate-mistake
+    commentary) or a mark scheme (which also states common wrong answers via
+    its "do not accept" / "common error" annotations, even when no separate
+    examiner report was uploaded) - both are optional per-paper, so the
+    caller scans whichever is present and merges the results.
+
+    Classifies each proposed misconception against the paper's own known
+    topic list (the same list used to classify questions) rather than a
+    single admin-typed spec_code, so a report covering several topics isn't
+    forced under one code. A misconception the model can't confidently place
+    on the list is dropped by the caller (misconception_taxonomy.spec_code
+    is NOT NULL, so there's no safe default to fall back to).
+    """
+    topics_list = "\n".join(f"- {t['spec_code']}: {t['title']}" for t in known_topics) if known_topics else "(none available)"
+    prompt = f"""
+    Analyze this {source_label} text:
+    \"\"\"{source_text[:4000]}\"\"\"
+
+    Extract recurring candidate mistakes, conceptual confusions, and traps. For a mark
+    scheme, these typically show up as "do not accept", "common error", or "credit is not
+    given for" style annotations rather than prose commentary.
+
+    For each one, classify it against this specification's topic list by choosing the
+    single best-matching spec_code from the list below, or null if none clearly apply:
+    {topics_list}
+
     Output ONLY a flat JSON object with exactly this shape (field names must
     match exactly - do not rename or add fields):
     {{"proposed_tags": [
-        {{"tag_id": "<snake_case_id, e.g. confuses_mitosis_meiosis>", "label": "<human readable title>", "description": "<precise description of the misconception>", "spec_code": "{spec_code}"}}
+        {{"tag_id": "<snake_case_id, e.g. confuses_mitosis_meiosis>", "label": "<human readable title>", "description": "<precise description of the misconception>", "spec_code": "<matching spec_code or null>"}}
     ]}}
     """
     res = await call_llm(prompt, temperature=0.2)
+    known_codes = {t["spec_code"] for t in known_topics} if known_topics else set()
     try:
         data = json.loads(res)
-        return _extract_list(data, "proposed_tags")
+        tags = _extract_list(data, "proposed_tags")
     except Exception:
-        return [
-            {
-                "tag_id": f"spec_{spec_code.replace('.', '_')}_misconception",
-                "label": f"Spec {spec_code} Common Error",
-                "description": "General misconception identified in examiner report.",
-                "spec_code": spec_code
-            }
-        ]
+        return []
+
+    return [t for t in tags if isinstance(t, dict) and t.get("spec_code") in known_codes]
 
 async def generate_and_validate_synthetic_answers(
     question_text: str,

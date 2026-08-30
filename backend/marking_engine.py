@@ -211,6 +211,19 @@ async def mark_question(
     - 1-2 mark questions: Evaluated deterministically via DSL in <10ms.
     - 3+ mark questions: Evaluated via LLM / Spec-Code Model against official mark scheme rubric.
     """
+    # 0. Practical (draw/complete/label on paper) - nothing typed to grade;
+    # the frontend never collects or submits an answer for these, but guard
+    # here too rather than falling through to the AI path on any stray call.
+    if marking_type == "practical":
+        return {
+            "marks_awarded": 0,
+            "marks_possible": mark_value,
+            "marked_by": "practical",
+            "feedback_text": "This question is self-checked against the mark scheme, not automatically marked.",
+            "missed_points": [],
+            "misconception_tags": []
+        }
+
     # 1. Deterministic DSL Path (1-2 Marks)
     if marking_type == "dsl" and marking_dsl:
         passed, fb = evaluate_dsl_expression(marking_dsl, student_answer)

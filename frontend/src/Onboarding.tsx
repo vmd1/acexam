@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import SubjectsManager from './SubjectsManager';
@@ -32,8 +32,13 @@ export default function Onboarding() {
         disabled={subjects.length === 0}
         style={{ width: '100%' }}
       >
-        Continue to Practice
+        Continue to practice
       </button>
+      {subjects.length === 0 && (
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.75rem', textAlign: 'center' }}>
+          Add at least one subject above to continue.
+        </p>
+      )}
     </div>
   );
 }

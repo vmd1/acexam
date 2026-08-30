@@ -5,6 +5,7 @@ from dependencies import rate_limit, get_current_admin_id
 from database import get_db
 import ingestion
 import ai_pipeline
+import asyncpg
 import fitz
 import json
 
@@ -28,25 +29,45 @@ async def upload_paper(
     file: UploadFile = File(...),
     mark_scheme_file: Optional[UploadFile] = File(None),
     examiner_report_file: Optional[UploadFile] = File(None),
-    exam_board: str = Form("AQA"),
-    subject: str = Form("Biology"),
-    level: str = Form("GCSE"),
-    paper_code: str = Form("8461/1H"),
-    series: str = Form("June 2023"),
-    spec_code: str = Form("4.2.1"),
+    exam_board: str = Form(...),
+    subject: str = Form(...),
+    level: str = Form(...),
+    tier: Optional[str] = Form(None),
     user_id: str = Depends(get_current_admin_id),
     db=Depends(get_db)
 ):
-    if not file.filename.endswith(".pdf"):
+    """
+    The admin only picks the qualification (exam board/level/subject - an
+    existing spec_topics combo, so questions can be classified against real
+    topics) and, if that qualification is tiered, which tier this specific
+    paper is. Everything else - paper code, series, and each question's own
+    content/topic/marking/misconceptions - is read off the PDFs themselves,
+    the same way spec ingestion derives its own metadata rather than relying
+    on admin-typed fields.
+    """
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Question paper must be a PDF file")
 
     qp_bytes = await file.read()
     ms_bytes = (await mark_scheme_file.read()) if mark_scheme_file else None
     er_bytes = (await examiner_report_file.read()) if examiner_report_file else None
 
+    # Read the paper's own code and series/session off its cover page,
+    # rather than an admin-facing form field - a real exam paper states
+    # these outright, the same way it states topics/questions.
+    paper_code, series = None, None
+    try:
+        qp_doc = fitz.open(stream=qp_bytes, filetype="pdf")
+        cover_text = "\n\n".join(qp_doc[i].get_text() for i in range(min(2, len(qp_doc))))
+        cover_meta = await ai_pipeline.extract_paper_cover_metadata_from_text(cover_text)
+        paper_code, series = cover_meta.get("paper_code"), cover_meta.get("series")
+    except Exception as e:
+        print(f"Paper cover metadata detection failed: {type(e).__name__}: {e}")
+
     # Fetch this subject's known specification topics so the AI can classify
-    # each question against the real topic list instead of everything in the
-    # paper being tagged with one manually-typed spec_code.
+    # each question (and any scanned misconceptions) against the real topic
+    # list instead of everything in the paper being tagged with one
+    # manually-typed spec_code.
     async with db.acquire() as conn:
         known_topic_rows = await conn.fetch(
             'SELECT spec_code, title FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3',
@@ -61,7 +82,6 @@ async def upload_paper(
             examiner_report_bytes=er_bytes,
             exam_board=exam_board,
             subject=subject,
-            spec_code=spec_code,
             known_topics=known_topics
         )
     except Exception as e:
@@ -72,26 +92,23 @@ async def upload_paper(
     async with db.acquire() as conn:
         # 1. Create Paper Record
         paper_id = await conn.fetchval('''
-            INSERT INTO papers (exam_board, subject, paper_code, series, source_pdf_url, status, uploaded_by)
-            VALUES ($1, $2, $3, $4, $5, 'needs_review', $6)
+            INSERT INTO papers (exam_board, subject, paper_code, series, source_pdf_url, status, uploaded_by, level, tier)
+            VALUES ($1, $2, $3, $4, $5, 'needs_review', $6, $7, $8)
             RETURNING id
-        ''', exam_board, subject, paper_code, series, mock_s3_url, user_id)
+        ''', exam_board, subject, paper_code, series, mock_s3_url, user_id, level, tier)
 
-        # 2. Fallback spec topic, used only for questions the AI couldn't classify
-        default_topic_id = await conn.fetchval(
-            'SELECT id FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3 AND spec_code = $4',
-            exam_board, subject, level, spec_code
-        )
-
-        # 3. Resolve each known topic's spec_code to its id, for per-question classification
+        # 2. Resolve each known topic's spec_code to its id, for per-question classification
         topic_id_by_code = {r["spec_code"]: r["id"] for r in await conn.fetch(
             'SELECT id, spec_code FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3',
             exam_board, subject, level
         )}
 
-        # 4. Insert Extracted Questions
+        # 3. Insert Extracted Questions. A question the AI couldn't
+        # confidently classify against a known topic is left uncategorized
+        # (spec_topic_id NULL) rather than dumped under one manually-picked
+        # fallback topic - needs_review already flags it for admin attention.
         for q in results.get("questions", []):
-            question_topic_id = topic_id_by_code.get(q.get("topic_spec_code"), default_topic_id)
+            question_topic_id = topic_id_by_code.get(q.get("topic_spec_code"))
             await conn.execute('''
                 INSERT INTO questions (
                     paper_id, question_number, mark_value, question_text,
@@ -106,15 +123,17 @@ async def upload_paper(
                 q.get("answer_type", "written"),
                 json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None
             )
-            
-        # 4. Save Proposed Misconceptions (§6.2a)
+
+        # 4. Save Proposed Misconceptions (§6.2a). Each is already classified
+        # against a known topic by the scanner; misconception_taxonomy.spec_code
+        # is NOT NULL so any that couldn't be matched were already dropped.
         for pm in results.get("proposed_misconceptions", []):
             await conn.execute('''
                 INSERT INTO misconception_taxonomy (spec_code, tag_id, label, description, approved_at)
                 VALUES ($1, $2, $3, $4, NULL)
                 ON CONFLICT (spec_code, tag_id) DO NOTHING
-            ''', pm.get("spec_code", spec_code), pm.get("tag_id"), pm.get("label"), pm.get("description"))
-            
+            ''', pm.get("spec_code"), pm.get("tag_id"), pm.get("label"), pm.get("description"))
+
     return {
         "message": "AI Pipeline completed successfully. Paper queued for admin review.",
         "paper_id": str(paper_id),
@@ -130,17 +149,19 @@ async def upload_paper(
 @router.post("/upload-spec")
 async def upload_specification(
     file: UploadFile = File(...),
-    exam_board: str = Form("AQA"),
-    subject: str = Form("Biology"),
-    level: str = Form("GCSE"),
     db=Depends(get_db)
 ):
     """
     Pre-populates spec_topics from the official exam board specification
     document, so the full topic hierarchy exists before any past paper is
     ingested (rather than admins hand-typing one spec_code per paper upload).
+
+    Exam board, subject and level are read off the document itself (its
+    cover page/branding) rather than admin-selected - the spec PDF already
+    states these, so asking the admin to also pick them from a dropdown is
+    redundant and error-prone (mismatches would silently misfile topics).
     """
-    if not file.filename.endswith(".pdf"):
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Specification must be a PDF file")
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -149,19 +170,31 @@ async def upload_specification(
     doc = fitz.open(stream=spec_bytes, filetype="pdf")
     spec_text = "\n\n".join(doc[i].get_text() for i in range(len(doc)))
 
-    topics = await ai_pipeline.extract_spec_topics_from_text(spec_text)
+    result = await ai_pipeline.extract_spec_topics_from_text(spec_text)
+    topics = result["topics"]
+    tiers = result["tiers"]
     if not topics:
         raise HTTPException(status_code=422, detail="Could not extract any topics from this specification document")
+
+    exam_board = result.get("exam_board")
+    subject = result.get("subject")
+    level = result.get("level")
+    if not exam_board or not subject or not level:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not determine exam board, subject and level from this specification document"
+        )
 
     async with db.acquire() as conn:
         code_to_id = {}
         for t in topics:
             topic_id = await conn.fetchval('''
-                INSERT INTO spec_topics (exam_board, subject, level, spec_code, title)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (exam_board, subject, level, spec_code) DO UPDATE SET title = EXCLUDED.title
+                INSERT INTO spec_topics (exam_board, subject, level, spec_code, title, tier_only)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (exam_board, subject, level, spec_code)
+                DO UPDATE SET title = EXCLUDED.title, tier_only = EXCLUDED.tier_only
                 RETURNING id
-            ''', exam_board, subject, level, t["spec_code"], t["title"])
+            ''', exam_board, subject, level, t["spec_code"], t["title"], t.get("tier_only"))
             code_to_id[t["spec_code"]] = topic_id
 
         for t in topics:
@@ -171,9 +204,21 @@ async def upload_specification(
                     code_to_id[t["parent_spec_code"]], code_to_id[t["spec_code"]]
                 )
 
+        # Record this qualification's tiers (e.g. Higher/Foundation), as
+        # stated by the specification itself - drives the tier step in the
+        # frontend subject picker. Empty tiers = no tier step (e.g. A-Level).
+        await conn.execute('''
+            INSERT INTO qualifications (exam_board, level, subject, tiers)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (exam_board, level, subject) DO UPDATE SET tiers = EXCLUDED.tiers
+        ''', exam_board, level, subject, tiers)
+
     return {
         "message": "Specification parsed and topics created.",
-        "topics_created": len(topics)
+        "topics_created": len(topics),
+        "exam_board": exam_board,
+        "subject": subject,
+        "level": level,
     }
 
 @router.get("/papers")
@@ -251,6 +296,26 @@ async def publish_paper(paper_id: str, db=Depends(get_db)):
     async with db.acquire() as conn:
         await conn.execute("UPDATE papers SET status = 'published' WHERE id = $1", paper_id)
         return {"status": "success", "message": "Paper published to live student question bank"}
+
+@router.delete("/paper/{paper_id}")
+async def delete_paper(paper_id: str, db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+    async with db.acquire() as conn:
+        try:
+            result = await conn.execute('DELETE FROM papers WHERE id = $1', paper_id)
+        except asyncpg.ForeignKeyViolationError:
+            # Students have already attempted/answered questions from this
+            # paper (answers/attempts reference it with NO ACTION, not
+            # CASCADE, so their work is never silently destroyed) - deleting
+            # isn't safe, so surface that instead of failing opaquely.
+            raise HTTPException(
+                status_code=409,
+                detail="Can't delete: students have already attempted questions from this paper."
+            )
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="Paper not found")
+        return {"status": "success", "message": "Paper deleted"}
 
 @router.get("/misconceptions")
 async def list_misconceptions(db=Depends(get_db)):

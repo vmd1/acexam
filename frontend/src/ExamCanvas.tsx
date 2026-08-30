@@ -1,28 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import 'katex/dist/katex.min.css';
 import api, { extractErrorMessage } from './api';
 import type { Question, AnswerOption, GridRow } from './types';
-import { formatUnits, formatBullets } from './formatUnits';
+import { formatUnits } from './formatUnits';
+import Markdown from './Markdown';
 import MathInput from './MathInput';
+import { Pen, Highlighter, Eraser, Undo2, Trash2, CheckCircle2, XCircle, AlertCircle, ArrowRight } from 'lucide-react';
 
 function parseJsonMaybe<T>(value: T | string | null | undefined, fallback: T): T {
   if (value == null) return fallback;
   if (typeof value !== 'string') return value;
   try { return JSON.parse(value); } catch { return fallback; }
-}
-
-function Markdown({ children }: { children: string }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-        {formatBullets(formatUnits(children))}
-      </ReactMarkdown>
-    </div>
-  );
 }
 
 interface ExamCanvasProps {
@@ -47,6 +34,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
   const [tools, setTools] = useState<Record<string, Tool>>({});
   const [history, setHistory] = useState<Record<string, ImageData[]>>({});
   const [isDrawing, setIsDrawing] = useState<Record<string, boolean>>({});
+  const [submitErrors, setSubmitErrors] = useState<Record<string, string>>({});
 
   const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
 
@@ -112,7 +100,9 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
     }
   };
 
-  const handleMouseDown = (qid: string) => (e: React.MouseEvent<HTMLCanvasElement>) => {
+  // Core drawing logic shared by mouse and touch input, keyed off raw
+  // viewport coordinates so both input types can drive the same canvas.
+  const startStroke = (qid: string, clientX: number, clientY: number) => {
     const canvas = canvasRefs.current[qid];
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -121,15 +111,17 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
     setHistory(prev => ({ ...prev, [qid]: [...(prev[qid] || []), ctx.getImageData(0, 0, canvas.width, canvas.height)] }));
 
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
 
     ctx.beginPath();
     ctx.moveTo(x, y);
     setIsDrawing(prev => ({ ...prev, [qid]: true }));
   };
 
-  const handleMouseMove = (qid: string) => (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const continueStroke = (qid: string, clientX: number, clientY: number) => {
     if (!isDrawing[qid]) return;
     const canvas = canvasRefs.current[qid];
     if (!canvas) return;
@@ -137,8 +129,10 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
     if (!ctx) return;
 
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
 
     const tool = tools[qid] || 'pen';
     if (tool === 'eraser') {
@@ -161,8 +155,40 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
     ctx.stroke();
   };
 
-  const handleMouseUp = (qid: string) => () => {
+  const endStroke = (qid: string) => {
     setIsDrawing(prev => ({ ...prev, [qid]: false }));
+  };
+
+  const handleMouseDown = (qid: string) => (e: React.MouseEvent<HTMLCanvasElement>) => {
+    startStroke(qid, e.clientX, e.clientY);
+  };
+
+  const handleMouseMove = (qid: string) => (e: React.MouseEvent<HTMLCanvasElement>) => {
+    continueStroke(qid, e.clientX, e.clientY);
+  };
+
+  const handleMouseUp = (qid: string) => () => {
+    endStroke(qid);
+  };
+
+  // Touch equivalents so the drawing canvas is usable on tablets/phones,
+  // not just with a mouse. preventDefault stops the page from scrolling
+  // while the student is drawing.
+  const handleTouchStart = (qid: string) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (touch) startStroke(qid, touch.clientX, touch.clientY);
+  };
+
+  const handleTouchMove = (qid: string) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (touch) continueStroke(qid, touch.clientX, touch.clientY);
+  };
+
+  const handleTouchEnd = (qid: string) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    endStroke(qid);
   };
 
   const handleUndo = (qid: string) => {
@@ -203,6 +229,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
     if (!answerText.trim() && mode === 'typed') return;
 
     setSubmitting(prev => ({ ...prev, [qid]: true }));
+    setSubmitErrors(prev => ({ ...prev, [qid]: '' }));
     try {
       let canvasDataUrl: string | undefined = undefined;
       if (mode === 'canvas' && canvasRefs.current[qid]) {
@@ -221,7 +248,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
         onAnswerSubmitted(res.data);
       }
     } catch (err: any) {
-      alert(extractErrorMessage(err, 'Failed to submit answer'));
+      setSubmitErrors(prev => ({ ...prev, [qid]: extractErrorMessage(err, 'Failed to submit answer') }));
     } finally {
       setSubmitting(prev => ({ ...prev, [qid]: false }));
     }
@@ -235,7 +262,6 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
       background: '#ffffff',
       color: '#0f172a',
       borderRadius: '12px',
-      padding: '2.5rem',
       boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5)',
       fontFamily: "'Crimson Pro', 'Georgia', serif",
       border: '1px solid #e2e8f0',
@@ -280,9 +306,10 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               ? (() => { try { return JSON.parse(question.images as any); } catch { return []; } })()
               : []);
 
-        return (
-          <div key={qid} style={{ marginBottom: idx < questions.length - 1 ? '2.5rem' : 0, paddingBottom: idx < questions.length - 1 ? '2rem' : 0, borderBottom: idx < questions.length - 1 ? '1px dashed #cbd5e1' : 'none' }}>
-            {/* Topic tag */}
+        // Shared header (topic tag, question text, mark value, images) used
+        // by both the practical and normal-input rendering below.
+        const questionHeader = (
+          <>
             {question.spec_code && (
               <div style={{ marginBottom: '0.5rem' }}>
                 <span style={{ background: '#f1f5f9', color: '#475569', padding: '0.2rem 0.5rem', borderRadius: '4px', fontSize: '0.8rem', fontFamily: 'sans-serif' }}>
@@ -291,7 +318,6 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               </div>
             )}
 
-            {/* Question Text */}
             <div style={{ fontSize: '1.25rem', lineHeight: '1.7', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
               <div style={{ flex: 1 }}>
                 <strong style={{ fontSize: '1.35rem', marginRight: '0.5rem', fontFamily: 'sans-serif' }}>
@@ -304,7 +330,6 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               </div>
             </div>
 
-            {/* Embedded Diagrams / Figures */}
             {imagesList.length > 0 && (
               <div style={{ marginBottom: '1.5rem', textAlign: 'center', background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                 {imagesList.map((img: any, i: number) => (
@@ -323,6 +348,70 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
                 ))}
               </div>
             )}
+          </>
+        );
+
+        // Draw/complete/label/plot questions have no text/numeric answer to
+        // grade - there's nothing meaningful to type in, so skip the whole
+        // input/submit/marking flow and just point the student at paper,
+        // letting them self-check against the mark scheme instead.
+        if (answerType === 'practical') {
+          return (
+            <div key={qid} style={{ marginBottom: idx < questions.length - 1 ? '2.5rem' : 0, paddingBottom: idx < questions.length - 1 ? '2rem' : 0, borderBottom: idx < questions.length - 1 ? '1px dashed #cbd5e1' : 'none' }}>
+              {questionHeader}
+
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.6rem',
+                background: '#fffbeb',
+                border: '1px solid #fde68a',
+                borderRadius: '8px',
+                padding: '0.75rem 1rem',
+                marginBottom: '1rem',
+                fontFamily: 'sans-serif',
+                fontSize: '0.9rem',
+                color: '#92400e'
+              }}>
+                <Pen size={16} aria-hidden="true" />
+                <span>This one's for pen and paper. Draw/complete it there, then check your work against the mark scheme below.</span>
+              </div>
+
+              <button
+                onClick={() => setShowMarkScheme(prev => ({ ...prev, [qid]: !prev[qid] }))}
+                style={{
+                  background: 'transparent',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '6px',
+                  padding: '0.5rem 1rem',
+                  fontFamily: 'sans-serif',
+                  fontSize: '0.9rem',
+                  fontWeight: 600,
+                  color: '#334155',
+                  cursor: 'pointer'
+                }}>
+                {showMarkScheme[qid] ? 'Hide mark scheme' : 'Show mark scheme'}
+              </button>
+
+              {showMarkScheme[qid] && (
+                <div style={{ marginTop: '0.75rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem', fontFamily: 'sans-serif', fontSize: '0.95rem' }}>
+                  <strong style={{ display: 'block', marginBottom: '0.35rem', color: '#0f172a' }}>Mark scheme</strong>
+                  <div style={{ color: '#334155' }}>
+                    {question.mark_scheme_text ? (
+                      <Markdown>{question.mark_scheme_text}</Markdown>
+                    ) : (
+                      'No mark scheme was extracted for this question.'
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <div key={qid} style={{ marginBottom: idx < questions.length - 1 ? '2.5rem' : 0, paddingBottom: idx < questions.length - 1 ? '2rem' : 0, borderBottom: idx < questions.length - 1 ? '1px dashed #cbd5e1' : 'none' }}>
+            {questionHeader}
 
             {/* Input Mode Switcher & Tools (written answers only) */}
             {!markingResult && answerType === 'written' && (
@@ -367,27 +456,44 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
                 </div>
 
                 {mode === 'canvas' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
                     <button
                       onClick={() => setTools(prev => ({ ...prev, [qid]: 'pen' }))}
-                      style={{ background: tool === 'pen' ? '#e2e8f0' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer' }}>
-                      Pen
+                      aria-pressed={tool === 'pen'}
+                      aria-label="Pen"
+                      title="Pen"
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: tool === 'pen' ? '#e2e8f0' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer' }}>
+                      <Pen size={14} aria-hidden="true" />
                     </button>
                     <button
                       onClick={() => setTools(prev => ({ ...prev, [qid]: 'highlighter' }))}
-                      style={{ background: tool === 'highlighter' ? '#fef08a' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer' }}>
-                      Highlight
+                      aria-pressed={tool === 'highlighter'}
+                      aria-label="Highlighter"
+                      title="Highlighter"
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: tool === 'highlighter' ? '#fef08a' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer' }}>
+                      <Highlighter size={14} aria-hidden="true" />
                     </button>
                     <button
                       onClick={() => setTools(prev => ({ ...prev, [qid]: 'eraser' }))}
-                      style={{ background: tool === 'eraser' ? '#e2e8f0' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer' }}>
-                      Eraser
+                      aria-pressed={tool === 'eraser'}
+                      aria-label="Eraser"
+                      title="Eraser"
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: tool === 'eraser' ? '#e2e8f0' : 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer' }}>
+                      <Eraser size={14} aria-hidden="true" />
                     </button>
-                    <button onClick={() => handleUndo(qid)} style={{ background: 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer' }}>
-                      Undo
+                    <button
+                      onClick={() => handleUndo(qid)}
+                      aria-label="Undo last stroke"
+                      title="Undo"
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer' }}>
+                      <Undo2 size={14} aria-hidden="true" />
                     </button>
-                    <button onClick={() => clearCanvas(qid)} style={{ background: 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer', color: '#ef4444' }}>
-                      Clear
+                    <button
+                      onClick={() => clearCanvas(qid)}
+                      aria-label="Clear drawing"
+                      title="Clear"
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer', color: '#ef4444' }}>
+                      <Trash2 size={14} aria-hidden="true" />
                     </button>
                   </div>
                 )}
@@ -485,10 +591,15 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
                     onMouseMove={handleMouseMove(qid)}
                     onMouseUp={handleMouseUp(qid)}
                     onMouseLeave={handleMouseUp(qid)}
+                    onTouchStart={handleTouchStart(qid)}
+                    onTouchMove={handleTouchMove(qid)}
+                    onTouchEnd={handleTouchEnd(qid)}
+                    aria-label={`Handwritten answer area for question ${question.question_number}`}
                     style={{
                       position: 'relative',
                       zIndex: 1,
                       cursor: tool === 'eraser' ? 'cell' : 'crosshair',
+                      touchAction: 'none',
                       width: '100%',
                       background: 'transparent'
                     }}
@@ -605,10 +716,15 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
                 border: `1px solid ${markingResult.is_full_marks ? '#86efac' : '#fecdd3'}`,
                 fontFamily: 'sans-serif'
               }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {markingResult.is_full_marks ? (
+                      <CheckCircle2 size={18} aria-hidden="true" color="#166534" />
+                    ) : (
+                      <XCircle size={18} aria-hidden="true" color="#9f1239" />
+                    )}
                     <strong style={{ fontSize: '1.1rem', color: markingResult.is_full_marks ? '#166534' : '#9f1239' }}>
-                      {markingResult.marks_awarded} / {markingResult.marks_possible} Marks Awarded
+                      {markingResult.marks_awarded} / {markingResult.marks_possible} marks awarded
                     </strong>
                   </div>
                   <button
@@ -723,23 +839,31 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
                 : (!answerText.trim() && (answerType !== 'written' || mode === 'typed'));
               const isDisabled = isSubmitting || incomplete;
               return (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', fontFamily: 'sans-serif' }}>
-                  <button
-                    onClick={() => handleSubmit(question)}
-                    disabled={isDisabled}
-                    style={{
-                      background: '#dc2626',
-                      color: '#ffffff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      padding: '0.65rem 1.5rem',
-                      fontWeight: 600,
-                      fontSize: '0.95rem',
-                      cursor: isDisabled ? 'not-allowed' : 'pointer',
-                      opacity: isDisabled ? 0.6 : 1
-                    }}>
-                    {isSubmitting ? 'Marking...' : `Submit & Mark ${question.question_number}`}
-                  </button>
+                <div style={{ fontFamily: 'sans-serif' }}>
+                  {submitErrors[qid] && (
+                    <div className="banner banner-danger" role="alert" style={{ marginBottom: '0.75rem', justifyContent: 'flex-end' }}>
+                      <AlertCircle size={16} />
+                      <span>{submitErrors[qid]}</span>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      onClick={() => handleSubmit(question)}
+                      disabled={isDisabled}
+                      style={{
+                        background: '#dc2626',
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        padding: '0.65rem 1.5rem',
+                        fontWeight: 600,
+                        fontSize: '0.95rem',
+                        cursor: isDisabled ? 'not-allowed' : 'pointer',
+                        opacity: isDisabled ? 0.6 : 1
+                      }}>
+                      {isSubmitting ? 'Marking…' : `Submit & mark ${question.question_number}`}
+                    </button>
+                  </div>
                 </div>
               );
             })()}
@@ -753,6 +877,9 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
           <button
             onClick={onNext}
             style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
               background: '#0f172a',
               color: '#ffffff',
               border: 'none',
@@ -762,7 +889,8 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               fontSize: '0.95rem',
               cursor: 'pointer'
             }}>
-            Next Question →
+            Next question
+            <ArrowRight size={16} aria-hidden="true" />
           </button>
         </div>
       )}

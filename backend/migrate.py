@@ -32,6 +32,12 @@ async def run_migrations():
     with open('schema_phase7.sql', 'r') as f:
         schema_7 = f.read()
 
+    with open('schema_phase8.sql', 'r') as f:
+        schema_8 = f.read()
+
+    with open('schema_phase9.sql', 'r') as f:
+        schema_9 = f.read()
+
     print("Executing Phase 1 schema...")
     await conn.execute(schema_1)
 
@@ -52,6 +58,12 @@ async def run_migrations():
 
     print("Executing Phase 7 schema...")
     await conn.execute(schema_7)
+
+    print("Executing Phase 8 schema...")
+    await conn.execute(schema_8)
+
+    print("Executing Phase 9 schema...")
+    await conn.execute(schema_9)
 
     print("Migrations complete!")
     await conn.close()

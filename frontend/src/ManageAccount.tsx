@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from './AuthContext';
 import api, { extractErrorMessage } from './api';
 import SubjectsManager from './SubjectsManager';
+import { AlertCircle, CheckCircle2 } from 'lucide-react';
 
 const YEAR_GROUPS = ['Year 7', 'Year 8', 'Year 9', 'Year 10', 'Year 11', 'Year 12', 'Year 13'];
 
@@ -61,22 +62,35 @@ export default function ManageAccount() {
       <h1 style={{ marginBottom: '2rem' }}>Manage Account</h1>
 
       <div className="card" style={{ marginBottom: '2rem' }}>
-        <h3 style={{ marginBottom: '1.25rem' }}>Your Subjects</h3>
-        <SubjectsManager />
+        <h3>Your subjects</h3>
+        <div style={{ marginTop: '1rem' }}>
+          <SubjectsManager />
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom: '2rem' }}>
-        <h3 style={{ marginBottom: '1.25rem' }}>Profile Information</h3>
-        {profileError && <div style={{ color: '#ef4444', marginBottom: '1rem' }}>{profileError}</div>}
-        {profileMsg && <div style={{ color: '#10b981', marginBottom: '1rem' }}>{profileMsg}</div>}
-        <form onSubmit={handleProfileSubmit}>
+        <h3>Profile information</h3>
+        {profileError && (
+          <div className="banner banner-danger" role="alert" style={{ marginTop: '1rem' }}>
+            <AlertCircle size={16} />
+            <span>{profileError}</span>
+          </div>
+        )}
+        {profileMsg && (
+          <div className="banner banner-success" role="status" style={{ marginTop: '1rem' }}>
+            <CheckCircle2 size={16} />
+            <span>{profileMsg}</span>
+          </div>
+        )}
+        <form onSubmit={handleProfileSubmit} style={{ marginTop: '1rem' }}>
           <div className="form-group">
-            <label>Email address</label>
-            <input type="email" value={user?.email || ''} className="form-control" disabled />
+            <label htmlFor="account-email">Email address</label>
+            <input id="account-email" type="email" value={user?.email || ''} className="form-control" disabled />
           </div>
           <div className="form-group">
-            <label>Full name</label>
+            <label htmlFor="account-name">Full name</label>
             <input
+              id="account-name"
               type="text"
               value={displayName}
               onChange={e => setDisplayName(e.target.value)}
@@ -85,8 +99,8 @@ export default function ManageAccount() {
             />
           </div>
           <div className="form-group">
-            <label>Year group</label>
-            <select value={yearGroup} onChange={e => setYearGroup(e.target.value)} className="form-control">
+            <label htmlFor="account-year">Year group</label>
+            <select id="account-year" value={yearGroup} onChange={e => setYearGroup(e.target.value)} className="form-control">
               {YEAR_GROUPS.map(y => <option key={y} value={y}>{y}</option>)}
             </select>
           </div>
@@ -97,13 +111,24 @@ export default function ManageAccount() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: '1.25rem' }}>Change Password</h3>
-        {passwordError && <div style={{ color: '#ef4444', marginBottom: '1rem' }}>{passwordError}</div>}
-        {passwordMsg && <div style={{ color: '#10b981', marginBottom: '1rem' }}>{passwordMsg}</div>}
-        <form onSubmit={handlePasswordSubmit}>
+        <h3>Change password</h3>
+        {passwordError && (
+          <div className="banner banner-danger" role="alert" style={{ marginTop: '1rem' }}>
+            <AlertCircle size={16} />
+            <span>{passwordError}</span>
+          </div>
+        )}
+        {passwordMsg && (
+          <div className="banner banner-success" role="status" style={{ marginTop: '1rem' }}>
+            <CheckCircle2 size={16} />
+            <span>{passwordMsg}</span>
+          </div>
+        )}
+        <form onSubmit={handlePasswordSubmit} style={{ marginTop: '1rem' }}>
           <div className="form-group">
-            <label>Current password</label>
+            <label htmlFor="account-current-password">Current password</label>
             <input
+              id="account-current-password"
               type="password"
               value={currentPassword}
               onChange={e => setCurrentPassword(e.target.value)}
@@ -112,8 +137,9 @@ export default function ManageAccount() {
             />
           </div>
           <div className="form-group">
-            <label>New password</label>
+            <label htmlFor="account-new-password">New password</label>
             <input
+              id="account-new-password"
               type="password"
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
@@ -123,8 +149,9 @@ export default function ManageAccount() {
             />
           </div>
           <div className="form-group">
-            <label>Confirm new password</label>
+            <label htmlFor="account-confirm-password">Confirm new password</label>
             <input
+              id="account-confirm-password"
               type="password"
               value={confirmPassword}
               onChange={e => setConfirmPassword(e.target.value)}

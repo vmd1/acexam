@@ -13,7 +13,6 @@ async def run_full_ai_ingestion_pipeline(
     examiner_report_bytes: bytes | None = None,
     exam_board: str = "AQA",
     subject: str = "Biology",
-    spec_code: str = "4.2.1",
     known_topics: List[Dict[str, str]] | None = None
 ) -> Dict[str, Any]:
     """
@@ -100,7 +99,21 @@ async def run_full_ai_ingestion_pipeline(
             q_page = None
             per_question_scheme = ""
 
-        marking_type = "dsl" if mark_val <= 2 else "ai"
+        # Mark value alone isn't a reliable signal - a 4-mark calculation
+        # with one correct numeric answer (or an MCQ/grid-select question)
+        # is just as deterministically gradable as a 1-mark question, via
+        # the DSL's EXACT/RANGE/MCQ/ANY operators. Only genuinely open-ended
+        # answers (free-text explanations, low mark_val as a proxy when the
+        # AI split wasn't available to classify answer_type) fall to AI. A
+        # "practical" question (draw/complete/label onto the paper itself)
+        # has no typed answer at all, so it's neither DSL nor AI markable -
+        # the student self-checks against the mark scheme instead.
+        answer_type = q.get("answer_type", "written") if using_ai_split else "written"
+        structured_answer = answer_type in ("numeric", "select", "multi_select", "grid_select")
+        if answer_type == "practical":
+            marking_type = "practical"
+        else:
+            marking_type = "dsl" if (mark_val <= 2 or structured_answer) else "ai"
 
         # Link images: page-aware when we have AI-assigned page numbers
         # (catches both same-page diagrams and shared stem diagrams
@@ -135,19 +148,22 @@ async def run_full_ai_ingestion_pipeline(
         # whole document's mark scheme text if isolation didn't yield one.
         question_mark_scheme = per_question_scheme or mark_scheme_text
 
-        # Compile Deterministic DSL for 1-2 mark questions
+        # Compile Deterministic DSL for questions gradeable that way (1-2
+        # marks, or a structured answer type at any mark value)
         dsl = None
         if marking_type == "dsl":
-            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(q["text"], mark_val, question_mark_scheme or q["text"])
+            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(q["text"], mark_val, question_mark_scheme or q["text"], answer_type)
 
-        # Synthetic dataset generation for 3+ mark questions (§6.2)
+        # Synthetic dataset generation for 3+ mark questions (§6.2). Tagged
+        # with this specific question's own AI-classified topic rather than
+        # one admin-typed spec_code for the whole paper.
         synthetic_examples = []
         if marking_type == "ai":
             synthetic_examples = await ai_pipeline.generate_and_validate_synthetic_answers(
                 question_text=q["text"],
                 mark_value=mark_val,
                 mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
-                spec_code=spec_code
+                spec_code=(q.get("topic_spec_code") if using_ai_split else None) or ""
             )
             pipeline_results["synthetic_training_dataset"].extend(synthetic_examples)
 
@@ -162,19 +178,29 @@ async def run_full_ai_ingestion_pipeline(
             "needs_review": any(img.get("needs_review") for img in q_images),
             # Best-matching spec_topics.spec_code for this specific question,
             # auto-classified by the AI splitter against the paper's known
-            # topic list. None if unclassified (falls back to the paper-level
-            # default spec_code chosen at upload time).
+            # topic list. None if unclassified (left uncategorized - flagged
+            # via needs_review for admin attention).
             "topic_spec_code": q.get("topic_spec_code") if using_ai_split else None,
-            "answer_type": q.get("answer_type", "written") if using_ai_split else "written",
+            "answer_type": answer_type,
             "answer_options": q.get("answer_options") if using_ai_split else None
         })
         
-    # 7. Examiner Report Misconception Scanning (§6.2a)
+    # 7. Misconception Scanning (§6.2a) - scans whichever of the mark scheme
+    # and examiner report are present (both optional uploads) and merges the
+    # results, deduped by tag_id, so a misconception surfaced by both isn't
+    # proposed twice. A mark scheme alone often reveals common wrong answers
+    # via its "do not accept"/"common error" annotations even with no
+    # separate examiner report uploaded.
+    proposed_by_tag: Dict[str, Dict[str, Any]] = {}
+    if mark_scheme_text:
+        for tag in await ai_pipeline.scan_text_for_misconceptions(mark_scheme_text, "mark scheme", known_topics or []):
+            proposed_by_tag[tag["tag_id"]] = tag
     if examiner_report_bytes:
         er_doc = fitz.open(stream=examiner_report_bytes, filetype="pdf")
         er_text = "\n\n".join([er_doc[i].get_text() for i in range(len(er_doc))])
-        proposed_tags = await ai_pipeline.scan_examiner_report_for_misconceptions(er_text, spec_code)
-        pipeline_results["proposed_misconceptions"] = proposed_tags
+        for tag in await ai_pipeline.scan_text_for_misconceptions(er_text, "examiner report", known_topics or []):
+            proposed_by_tag[tag["tag_id"]] = tag
+    pipeline_results["proposed_misconceptions"] = list(proposed_by_tag.values())
 
     pipeline_results["token_usage"] = ai_pipeline.get_token_usage()
 

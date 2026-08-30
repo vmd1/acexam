@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import api from './api';
 import ExamCanvas from './ExamCanvas';
 import type { Question } from './types';
+import Spinner from './Spinner';
+import EmptyState from './EmptyState';
+import { AlertTriangle, ClipboardX, Trophy } from 'lucide-react';
 
 // Groups sub-questions that belong to the same parent question number
 // (e.g. "1(a)", "1(b)", "1(c)" or "01.1", "01.2") so they render together
@@ -108,14 +111,11 @@ export default function PracticeSession() {
 
   if (loading) {
     return (
-      <div className="container" style={{ textAlign: 'center', marginTop: '4rem' }}>
-        <h2>Loading your practice queue...</h2>
-        <p style={{ color: 'var(--text-secondary)' }}>
-          {sessionConfig.mode === 'adaptive'
-            ? 'Consulting Master Student Profile & Ebbinghaus decay curve...'
-            : `Gathering questions for ${sessionConfig.subject}...`}
-        </p>
-      </div>
+      <Spinner
+        label={sessionConfig.mode === 'adaptive'
+          ? 'Finding the topics that need your attention most…'
+          : `Gathering questions for ${sessionConfig.subject}…`}
+      />
     );
   }
 
@@ -124,28 +124,30 @@ export default function PracticeSession() {
     return (
       <div className="container" style={{ maxWidth: '650px', marginTop: '3rem', textAlign: 'center' }}>
         <div className="card" style={{ padding: '3rem' }}>
-          <h2 style={{ marginBottom: '0.5rem' }}>Practice Session Completed!</h2>
+          <Trophy size={40} strokeWidth={1.5} style={{ color: 'var(--accent-color)', marginBottom: '0.75rem' }} aria-hidden="true" />
+          <h2 style={{ marginBottom: '0.5rem' }}>Session complete</h2>
           <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>
-            Your Master Student Profile has been updated with real-time EWMA mastery scores.
+            Nice work — your mastery scores have been updated with what you just did.
           </p>
 
           <div style={{
             display: 'flex',
             justifyContent: 'center',
             gap: '2rem',
-            background: 'var(--border)',
+            background: 'var(--bg-tertiary)',
+            border: '1px solid var(--border)',
             padding: '1.5rem',
             borderRadius: '12px',
             marginBottom: '2rem'
           }}>
             <div>
-              <div style={{ fontSize: '2rem', fontWeight: 800, color: '#dc2626' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: 'var(--accent-color)' }}>
                 {sessionScore.earned} / {sessionScore.possible}
               </div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Marks Earned</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Marks earned</div>
             </div>
             <div>
-              <div style={{ fontSize: '2rem', fontWeight: 800, color: pct >= 70 ? '#10b981' : '#f59e0b' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: pct >= 70 ? 'var(--success)' : 'var(--warning)' }}>
                 {pct}%
               </div>
               <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Accuracy</div>
@@ -154,13 +156,13 @@ export default function PracticeSession() {
 
           <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
             <button onClick={fetchQueue} className="btn btn-primary">
-              Start Another Queue
+              Start another queue
             </button>
             <button onClick={() => navigate('/app')} className="btn btn-outline">
-              Change Practice Setup
+              Change practice setup
             </button>
             <a href="/analytics" className="btn btn-outline">
-              View Analytics Heatmap
+              View analytics
             </a>
           </div>
         </div>
@@ -180,9 +182,9 @@ export default function PracticeSession() {
         maxWidth: '850px',
         margin: '0 auto 1.5rem auto'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           <span style={{
-            background: '#dc2626',
+            background: 'var(--accent-color)',
             color: '#ffffff',
             padding: '0.2rem 0.6rem',
             borderRadius: '6px',
@@ -193,19 +195,23 @@ export default function PracticeSession() {
           </span>
           {focusReason && focusReason.active_misconceptions_count > 0 && (
             <span style={{
-              background: 'rgba(239, 68, 68, 0.15)',
-              color: '#f87171',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.3rem',
+              background: 'var(--danger-bg)',
+              color: 'var(--danger)',
               padding: '0.2rem 0.6rem',
               borderRadius: '6px',
               fontSize: '0.8rem'
             }}>
+              <AlertTriangle size={13} aria-hidden="true" />
               Targeting {focusReason.active_misconceptions_count} active misconception(s)
             </span>
           )}
         </div>
 
         <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-          Session Score: <strong style={{ color: '#ffffff' }}>{sessionScore.earned} / {sessionScore.possible}</strong>
+          Score: <strong style={{ color: 'var(--text-primary)' }}>{sessionScore.earned} / {sessionScore.possible}</strong>
         </div>
       </div>
 
@@ -217,11 +223,17 @@ export default function PracticeSession() {
           onNext={handleNext}
         />
       ) : (
-        <div className="card text-center" style={{ maxWidth: '600px', margin: '0 auto' }}>
-          <p>No questions currently available for this selection.</p>
-          <button onClick={() => navigate('/app')} className="btn btn-outline" style={{ marginTop: '1rem' }}>
-            Change Practice Setup
-          </button>
+        <div style={{ maxWidth: '600px', margin: '0 auto' }} className="card">
+          <EmptyState
+            icon={<ClipboardX size={40} strokeWidth={1.5} />}
+            title="Nothing to practice here yet"
+            description="There aren't any questions available for this selection right now."
+            action={
+              <button onClick={() => navigate('/app')} className="btn btn-outline">
+                Change practice setup
+              </button>
+            }
+          />
         </div>
       )}
     </div>

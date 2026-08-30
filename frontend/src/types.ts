@@ -1,4 +1,4 @@
-export type AnswerType = 'written' | 'select' | 'multi_select' | 'numeric' | 'grid_select';
+export type AnswerType = 'written' | 'select' | 'multi_select' | 'numeric' | 'grid_select' | 'practical';
 
 export interface AnswerOption {
   key: string;

@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from './api';
 import { groupByTopicHierarchy } from './topicHierarchy';
+import Spinner from './Spinner';
+import EmptyState from './EmptyState';
+import { Sparkles, AlertTriangle, BookOpen } from 'lucide-react';
 
 interface Topic {
   id: string;
@@ -11,6 +14,14 @@ interface Topic {
   spec_code: string;
   title: string;
   parent_id: string | null;
+  tier_only: string | null;
+}
+
+interface UserSubject {
+  exam_board: string;
+  subject: string;
+  level: string;
+  tier: string | null;
 }
 
 interface MasteryInfo {
@@ -23,6 +34,7 @@ const WEAK_THRESHOLD = 0.45;
 export default function PracticeSetup() {
   const navigate = useNavigate();
   const [topics, setTopics] = useState<Topic[]>([]);
+  const [userSubjects, setUserSubjects] = useState<UserSubject[]>([]);
   const [mastery, setMastery] = useState<Record<string, MasteryInfo>>({});
   const [loading, setLoading] = useState(true);
   const [selectedSubjectKey, setSelectedSubjectKey] = useState<string | null>(null);
@@ -31,11 +43,13 @@ export default function PracticeSetup() {
   useEffect(() => {
     (async () => {
       try {
-        const [topicsRes, profileRes] = await Promise.all([
+        const [topicsRes, profileRes, subjectsRes] = await Promise.all([
           api.get('/exams/topics'),
           api.get('/analytics/profile'),
+          api.get('/auth/me/subjects'),
         ]);
         setTopics(topicsRes.data);
+        setUserSubjects(subjectsRes.data);
         const m: Record<string, MasteryInfo> = {};
         (profileRes.data.topic_mastery || []).forEach((t: any) => {
           m[t.id] = { mastery_score: t.mastery_score, attempts_count: t.attempts_count };
@@ -49,15 +63,30 @@ export default function PracticeSetup() {
     })();
   }, []);
 
+  // A tiered GCSE spec merges Higher and Foundation content into one
+  // document and flags some topics as Higher-tier-only (topic.tier_only).
+  // Foundation students (or students whose tier for a subject isn't set)
+  // must never see or select that content, mirroring the exclusion applied
+  // server-side when generating a practice paper.
+  const tierBySubjectKey = useMemo(() => {
+    const map = new Map<string, string | null>();
+    userSubjects.forEach(s => {
+      map.set(`${s.level}::${s.exam_board}::${s.subject}`, s.tier);
+    });
+    return map;
+  }, [userSubjects]);
+
   const subjectGroups = useMemo(() => {
     const map = new Map<string, { exam_board: string; subject: string; level: string; topics: Topic[] }>();
     topics.forEach(t => {
       const key = `${t.level}::${t.exam_board}::${t.subject}`;
+      const studentTier = tierBySubjectKey.get(key);
+      if (t.tier_only && t.tier_only !== studentTier) return;
       if (!map.has(key)) map.set(key, { exam_board: t.exam_board, subject: t.subject, level: t.level, topics: [] });
       map.get(key)!.topics.push(t);
     });
     return Array.from(map.entries()).map(([key, v]) => ({ key, ...v }));
-  }, [topics]);
+  }, [topics, tierBySubjectKey]);
 
   const isWeak = (topicId: string) => {
     const m = mastery[topicId];
@@ -106,12 +135,12 @@ export default function PracticeSetup() {
   };
 
   if (loading) {
-    return <div className="container text-center" style={{ marginTop: '4rem' }}>Loading subjects...</div>;
+    return <Spinner label="Pulling up your subjects…" />;
   }
 
   return (
     <div className="container" style={{ marginTop: '2.5rem', marginBottom: '4rem', maxWidth: '900px' }}>
-      <h1 style={{ marginBottom: '0.5rem' }}>Start Practicing</h1>
+      <h1 style={{ marginBottom: '0.5rem' }}>Start practicing</h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>
         Choose a subject and specific topics, jump into random questions, or let the adaptive engine target your weakest areas.
       </p>
@@ -124,18 +153,25 @@ export default function PracticeSetup() {
         flexWrap: 'wrap',
         gap: '1rem',
       }}>
-        <div>
-          <h3 style={{ marginBottom: '0.25rem' }}>Adaptive Practice</h3>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0 }}>
-            Automatically targets your weakest topics, active misconceptions, and decaying memory.
-          </p>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
+          <span className="hero-stat-icon" aria-hidden="true"><Sparkles size={20} /></span>
+          <div>
+            <h3 style={{ marginBottom: '0.25rem' }}>Adaptive practice</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0 }}>
+              Automatically targets your weakest topics, active misconceptions, and decaying memory.
+            </p>
+          </div>
         </div>
-        <button className="btn btn-primary" onClick={startAdaptive}>Start Adaptive Session</button>
+        <button className="btn btn-primary" onClick={startAdaptive}>Start adaptive session</button>
       </div>
 
       <h3 style={{ marginBottom: '1rem' }}>Or choose a subject</h3>
       {subjectGroups.length === 0 ? (
-        <p style={{ color: 'var(--text-muted)' }}>No subjects available yet.</p>
+        <EmptyState
+          icon={<BookOpen size={40} strokeWidth={1.5} />}
+          title="No subjects yet"
+          description="Add a subject from your account settings to start practicing."
+        />
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
           {subjectGroups.map(g => {
@@ -155,7 +191,8 @@ export default function PracticeSetup() {
                 <div style={{ fontWeight: 700 }}>{g.subject}</div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{g.level} {g.exam_board} &middot; {g.topics.length} topics</div>
                 {weakCount > 0 && (
-                  <div style={{ fontSize: '0.75rem', color: '#f87171', marginTop: '0.4rem', fontWeight: 600 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', color: 'var(--danger)', marginTop: '0.4rem', fontWeight: 600 }}>
+                    <AlertTriangle size={13} aria-hidden="true" />
                     {weakCount} topic{weakCount > 1 ? 's' : ''} need work
                   </div>
                 )}
@@ -208,7 +245,8 @@ export default function PracticeSetup() {
                     <span>{label}</span>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                       {weakCount > 0 && (
-                        <span style={{ color: '#f87171', fontSize: '0.8rem', fontWeight: 600 }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: 'var(--danger)', fontSize: '0.8rem', fontWeight: 600 }}>
+                          <AlertTriangle size={13} aria-hidden="true" />
                           {weakCount} need work
                         </span>
                       )}
@@ -243,11 +281,20 @@ export default function PracticeSetup() {
                           cursor: 'pointer',
                         }}>
                           <span style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                            <input type="checkbox" checked={checked} onChange={() => toggleTopic(t.id)} />
+                            <input
+                              type="checkbox"
+                              id={`topic-${t.id}`}
+                              checked={checked}
+                              onChange={() => toggleTopic(t.id)}
+                              aria-label={`${t.spec_code} ${t.title}`}
+                            />
                             <span>{t.spec_code} {t.title}</span>
                           </span>
                           {weak ? (
-                            <span style={{ fontSize: '0.75rem', color: '#f87171', fontWeight: 700 }}>Needs work</span>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', color: 'var(--danger)', fontWeight: 700 }}>
+                              <AlertTriangle size={13} aria-hidden="true" />
+                              Needs work
+                            </span>
                           ) : m && m.attempts_count > 0 ? (
                             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{Math.round(m.mastery_score * 100)}% mastery</span>
                           ) : (
