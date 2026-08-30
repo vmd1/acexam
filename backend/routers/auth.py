@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 import bcrypt
 import json
 from database import get_db
@@ -17,6 +18,25 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+class UpdateProfileRequest(BaseModel):
+    display_name: Optional[str] = None
+    exam_board: Optional[str] = None
+    year_group: Optional[str] = None
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class AddUserSubjectRequest(BaseModel):
+    exam_board: str
+    level: str
+    subject: str
+
+class UpdateUserSubjectRequest(BaseModel):
+    exam_board: Optional[str] = None
+    level: Optional[str] = None
+    subject: Optional[str] = None
 
 @router.post("/register")
 async def register(req: RegisterRequest, db=Depends(get_db)):
@@ -92,5 +112,126 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-        
+
     return dict(user)
+
+@router.patch("/me")
+async def update_me(req: UpdateProfileRequest, user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    updates = req.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    fields = []
+    params = []
+    for col, val in updates.items():
+        params.append(val)
+        fields.append(f"{col} = ${len(params)}")
+    params.append(user_id)
+
+    async with db.acquire() as conn:
+        await conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ${len(params)}", *params)
+        user = await conn.fetchrow(
+            "SELECT id, email, display_name, exam_board, year_group, is_admin FROM users WHERE id = $1", user_id
+        )
+
+    return dict(user)
+
+@router.post("/me/password")
+async def change_password(req: ChangePasswordRequest, user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    async with db.acquire() as conn:
+        user = await conn.fetchrow("SELECT password_hash FROM users WHERE id = $1", user_id)
+        if not user or not user["password_hash"] or not bcrypt.checkpw(
+            req.current_password.encode('utf-8'), user["password_hash"].encode('utf-8')
+        ):
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+        new_hash = bcrypt.hashpw(req.new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        await conn.execute("UPDATE users SET password_hash = $1 WHERE id = $2", new_hash, user_id)
+
+    return {"message": "Password updated"}
+
+@router.get("/me/subjects")
+async def list_my_subjects(user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, exam_board, level, subject FROM user_subjects WHERE user_id = $1 ORDER BY created_at ASC",
+            user_id
+        )
+    return [dict(r) for r in rows]
+
+@router.post("/me/subjects")
+async def add_my_subject(req: AddUserSubjectRequest, user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO user_subjects (user_id, exam_board, level, subject)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, exam_board, level, subject) DO UPDATE SET exam_board = EXCLUDED.exam_board
+            RETURNING id, exam_board, level, subject
+            """,
+            user_id, req.exam_board, req.level, req.subject
+        )
+    return dict(row)
+
+@router.patch("/me/subjects/{subject_id}")
+async def update_my_subject(
+    subject_id: str,
+    req: UpdateUserSubjectRequest,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db)
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    updates = req.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    fields = []
+    params = []
+    for col, val in updates.items():
+        params.append(val)
+        fields.append(f"{col} = ${len(params)}")
+    params.append(subject_id)
+    params.append(user_id)
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE user_subjects SET {', '.join(fields)}
+            WHERE id = ${len(params) - 1} AND user_id = ${len(params)}
+            RETURNING id, exam_board, level, subject
+            """,
+            *params
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Subject not found")
+    return dict(row)
+
+@router.delete("/me/subjects/{subject_id}")
+async def remove_my_subject(subject_id: str, user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM user_subjects WHERE id = $1 AND user_id = $2", subject_id, user_id
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Subject not found")
+    return {"message": "Subject removed"}

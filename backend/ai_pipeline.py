@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import os
 import json
 import re
@@ -9,6 +10,35 @@ from typing import List, Dict, Any, Tuple, Optional
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+
+# Per-request token usage accounting. A ContextVar (rather than a module
+# global) so concurrent ingestion requests each get their own isolated
+# running total instead of clobbering each other's counts.
+_token_usage_var: contextvars.ContextVar[Optional[Dict[str, int]]] = contextvars.ContextVar(
+    "token_usage", default=None
+)
+
+def reset_token_usage() -> None:
+    _token_usage_var.set({
+        "prompt_tokens": 0,
+        "output_tokens": 0,
+        "thoughts_tokens": 0,
+        "total_tokens": 0,
+        "call_count": 0,
+    })
+
+def get_token_usage() -> Dict[str, int]:
+    return dict(_token_usage_var.get() or {})
+
+def _record_token_usage(usage_metadata: Dict[str, Any]) -> None:
+    acc = _token_usage_var.get()
+    if acc is None:
+        return
+    acc["prompt_tokens"] += usage_metadata.get("promptTokenCount", 0) or 0
+    acc["output_tokens"] += usage_metadata.get("candidatesTokenCount", 0) or 0
+    acc["thoughts_tokens"] += usage_metadata.get("thoughtsTokenCount", 0) or 0
+    acc["total_tokens"] += usage_metadata.get("totalTokenCount", 0) or 0
+    acc["call_count"] += 1
 
 async def call_llm(
     prompt: str,
@@ -62,6 +92,7 @@ async def call_llm(
                     res = await client.post(url, json=payload)
                     if res.status_code == 200:
                         data = res.json()
+                        _record_token_usage(data.get("usageMetadata", {}))
                         candidates = data.get("candidates", [])
                         if candidates:
                             parts_out = candidates[0].get("content", {}).get("parts", [])
@@ -273,7 +304,60 @@ async def generate_dual_image_descriptions(image_dict: Dict[str, Any]) -> Tuple[
     is_agreed = jaccard_score >= 0.65
     return desc_a_text, desc_b_text, is_agreed, round(jaccard_score, 3)
 
-async def split_paper_into_questions(page_texts: List[str], mark_scheme_text: str) -> List[Dict[str, Any]]:
+VALID_ANSWER_TYPES = {"written", "select", "multi_select", "numeric", "grid_select"}
+
+def _clean_answer_type_and_options(raw_type: Any, raw_options: Any) -> Tuple[str, Optional[Any]]:
+    """
+    Validates the model's answer_type/answer_options pair, falling back to
+    a plain written textbox on anything malformed - a bad classification
+    here should never crash ingestion or produce a broken answer widget.
+    """
+    answer_type = str(raw_type).strip().lower() if raw_type else "written"
+    if answer_type not in VALID_ANSWER_TYPES:
+        answer_type = "written"
+
+    if answer_type == "written":
+        return "written", None
+
+    if answer_type in ("select", "multi_select"):
+        if not isinstance(raw_options, list) or not raw_options:
+            return "written", None
+        options = []
+        for opt in raw_options:
+            if isinstance(opt, dict) and opt.get("key") and opt.get("text"):
+                options.append({"key": str(opt["key"]).strip(), "text": str(opt["text"]).strip()})
+        if len(options) < 2:
+            return "written", None
+        return answer_type, options
+
+    if answer_type == "numeric":
+        unit = None
+        if isinstance(raw_options, dict):
+            unit = raw_options.get("unit")
+        return "numeric", {"unit": str(unit).strip() if unit else None}
+
+    if answer_type == "grid_select":
+        if not isinstance(raw_options, list) or not raw_options:
+            return "written", None
+        rows = []
+        for row in raw_options:
+            if (isinstance(row, dict) and row.get("statement")
+                    and isinstance(row.get("options"), list) and len(row["options"]) >= 2):
+                rows.append({
+                    "statement": str(row["statement"]).strip(),
+                    "options": [str(o).strip() for o in row["options"]]
+                })
+        if not rows:
+            return "written", None
+        return "grid_select", rows
+
+    return "written", None
+
+async def split_paper_into_questions(
+    page_texts: List[str],
+    mark_scheme_text: str,
+    known_topics: Optional[List[Dict[str, str]]] = None
+) -> List[Dict[str, Any]]:
     """
     §3.1 AI-driven joint question + mark-scheme splitting.
 
@@ -297,20 +381,61 @@ async def split_paper_into_questions(page_texts: List[str], mark_scheme_text: st
     """
     numbered_pages = "\n\n".join(f"[PAGE {i + 1}]\n{text}" for i, text in enumerate(page_texts))
 
+    topics_block = ""
+    if known_topics:
+        topics_list = "\n".join(f'- {t["spec_code"]}: {t["title"]}' for t in known_topics)
+        topics_block = f"""
+    This paper's specification topics (choose the single best match per question, or null if none fit):
+    {topics_list}
+    """
+
     prompt = f"""
     You are given the full text of a UK exam board question paper (with [PAGE N] markers) and its mark scheme.
     Extract every distinct question and sub-question (e.g. "1", "01.1", "3(b)(ii)") in the order they appear.
 
     For each one, output:
     - question_number: the number/label as printed (e.g. "01.4", "3(b)(ii)")
-    - question_text: the full text of just that question/sub-question (not neighbouring questions, not headers/footers/instructions)
+    - question_text: the full text of just that question/sub-question (not neighbouring questions, not headers/footers/instructions),
+      formatted as Markdown:
+        * Wrap the command word (Explain, Calculate, Describe, Evaluate, etc.) in **bold**.
+        * If the question presents multiple-choice options (e.g. "A ... B ... C ... D ..." or "Tick one box"),
+          render each option as its own Markdown list item, e.g. "- A: <option text>".
+        * If the question refers to a table of data, reproduce it as a Markdown table.
+        * Preserve any numbered sub-parts as a Markdown ordered/unordered list.
+        * If the question text contains a bulleted list of steps, items, or conditions (marked in the source with
+          "•", "-", "*", or similar), render each one as its own Markdown list item on its own line
+          (e.g. "- Count all cells that are completely within the square.") rather than leaving them inline
+          in one paragraph.
     - mark_value: the integer mark value from its "[N marks]" annotation. If not stated, use 1.
     - page: the page number (from the [PAGE N] markers) where this question's text appears
-    - mark_scheme_text: ONLY this question's corresponding mark scheme text, extracted from the Mark Scheme section below - not the whole mark scheme document, not other questions' marking points
-
+    - mark_scheme_text: ONLY this question's corresponding mark scheme text, extracted from the Mark Scheme section below
+      (not the whole mark scheme document, not other questions' marking points), formatted as a Markdown bullet list of
+      individual marking points (one point per list item).
+    - references_figure: true if the question text mentions or depends on a diagram, image, graph, table, or figure
+      (e.g. "Figure 1 shows...", "the diagram below"); false otherwise.
+    - figure_label: if references_figure is true and the question names the figure/diagram it depends on
+      (e.g. "Figure 9", "Diagram 2", "Figure 3a"), the label exactly as printed in the question text. Use null if
+      references_figure is false, or if it references an image without naming a specific label (e.g. "the diagram
+      below"). This becomes the caption shown under the image so students can tell which figure a question is
+      talking about - extract it verbatim, don't paraphrase or invent one.
+    - topic_spec_code: the specification code (from the list below, if provided) that this question is testing.
+      Use null if no topic list is given or none of them fit.
+    - answer_type: how the student should answer, one of:
+        * "written" - free text / prose / calculation working (the default for Explain/Describe/Evaluate/Calculate questions)
+        * "select" - a single choice from a fixed list (e.g. "Tick one box")
+        * "multi_select" - more than one choice from a fixed list (e.g. "Tick two boxes")
+        * "numeric" - the answer is just one number (a calculation result), optionally with a unit
+        * "grid_select" - one choice per row/statement (e.g. "Tick True or False for each row" against a list of statements)
+      Choose "written" whenever unsure - only use the others when the question clearly fits.
+    - answer_options: required only for select/multi_select/numeric/grid_select, else null:
+        * select or multi_select: a list of {{"key": "A", "text": "<option text>"}} (or {{"key": "<option text>", "text": "<option text>"}} if unlettered)
+        * numeric: {{"unit": "<unit string or null>"}}
+        * grid_select: a list of {{"statement": "<row text>", "options": ["True", "False"]}} - one entry per row,
+          only if the row statements are present in the text (not solely inside an image/table you cannot read)
+    {topics_block}
     Ignore administrative/boilerplate text: "Do not write outside the box", print/version codes, blank answer lines, page numbers.
 
-    Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "..."}}, ...]}}
+    Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "...", "references_figure": true, "figure_label": "Figure 9", "topic_spec_code": "...", "answer_type": "written", "answer_options": null}}, ...]}}
 
     QUESTION PAPER:
     \"\"\"{numbered_pages[:80000]}\"\"\"
@@ -346,12 +471,22 @@ async def split_paper_into_questions(page_texts: List[str], mark_scheme_text: st
                     page = max(1, int(q.get("page", 1)))
                 except (TypeError, ValueError):
                     page = 1
+                topic_spec_code = q.get("topic_spec_code")
+                figure_label = q.get("figure_label")
+                answer_type, answer_options = _clean_answer_type_and_options(
+                    q.get("answer_type"), q.get("answer_options")
+                )
                 cleaned.append({
                     "number": str(number).strip(),
                     "text": str(text).strip(),
                     "mark_value": mark_val,
                     "page": page,
-                    "mark_scheme_text": str(q.get("mark_scheme_text") or "").strip()
+                    "mark_scheme_text": str(q.get("mark_scheme_text") or "").strip(),
+                    "references_figure": bool(q.get("references_figure", False)),
+                    "figure_label": str(figure_label).strip() if figure_label else None,
+                    "topic_spec_code": str(topic_spec_code).strip() if topic_spec_code else None,
+                    "answer_type": answer_type,
+                    "answer_options": answer_options
                 })
 
             if len(cleaned) > len(best):
@@ -369,6 +504,63 @@ async def split_paper_into_questions(page_texts: List[str], mark_scheme_text: st
     if not best:
         print("AI question splitting: all attempts returned no usable questions, falling back to regex")
     return best
+
+async def extract_spec_topics_from_text(spec_text: str) -> List[Dict[str, Any]]:
+    """
+    Parses an official exam board specification document into its full
+    topic hierarchy, so an admin can pre-populate spec_topics ahead of
+    ingesting any past papers rather than typing topic codes by hand.
+
+    Returns a flat list of {spec_code, title, parent_spec_code} - one entry
+    per numbered specification section/sub-section - so the caller can
+    resolve parent_id by matching parent_spec_code against another entry's
+    spec_code. Returns [] on failure.
+    """
+    prompt = f"""
+    You are given the text of an official UK exam board subject specification document.
+    Extract every numbered content section and sub-section (e.g. "4.1", "4.1.1", "4.1.2.3") -
+    these define the topics students are examined on.
+
+    For each one, output:
+    - spec_code: the section number exactly as printed (e.g. "4.1.1")
+    - title: the short title/heading of that section (not the full teaching content underneath it)
+    - parent_spec_code: the spec_code of its immediate parent section (e.g. "4.1.2"'s parent is "4.1"),
+      or null for a top-level section
+
+    Ignore front matter (contents pages, assessment objectives, grade boundaries) and appendices.
+
+    Output ONLY a flat JSON object: {{"topics": [{{"spec_code": "...", "title": "...", "parent_spec_code": "..."}}, ...]}}
+
+    SPECIFICATION DOCUMENT:
+    \"\"\"{spec_text[:100000]}\"\"\"
+    """
+    system_prompt = "You are an expert UK exam board specification parser. Output only valid JSON, no commentary."
+
+    res = await call_llm(prompt, temperature=0.1, system_prompt=system_prompt)
+    try:
+        data = json.loads(res)
+        raw_topics = data.get("topics", [])
+        if not isinstance(raw_topics, list):
+            return []
+
+        cleaned = []
+        for t in raw_topics:
+            if not isinstance(t, dict):
+                continue
+            spec_code = t.get("spec_code")
+            title = t.get("title")
+            if not spec_code or not title:
+                continue
+            parent_code = t.get("parent_spec_code")
+            cleaned.append({
+                "spec_code": str(spec_code).strip(),
+                "title": str(title).strip(),
+                "parent_spec_code": str(parent_code).strip() if parent_code else None
+            })
+        return cleaned
+    except Exception as e:
+        print(f"Specification topic extraction failed to parse: {type(e).__name__}: {e}")
+        return []
 
 async def compile_mark_scheme_to_dsl(question_text: str, mark_value: int, mark_scheme: str) -> str:
     """

@@ -71,7 +71,7 @@ export default function AdminReview() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
         <div>
           <h1 style={{ fontSize: '2.2rem', marginBottom: '0.25rem' }}>Admin Ingestion Console</h1>
-          <p style={{ color: '#94a3b8' }}>Review PyMuPDF extraction, calibrate deterministic DSL rubrics, and publish past papers.</p>
+          <p style={{ color: 'var(--text-secondary)' }}>Review PyMuPDF extraction, calibrate deterministic DSL rubrics, and publish past papers.</p>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button
@@ -101,8 +101,8 @@ Misconception Taxonomy ({misconceptions.length})
                     padding: '1rem',
                     borderRadius: '8px',
                     cursor: 'pointer',
-                    background: selectedPaper?.id === p.id ? 'rgba(99, 102, 241, 0.15)' : 'rgba(255, 255, 255, 0.03)',
-                    border: `1px solid ${selectedPaper?.id === p.id ? '#6366f1' : 'rgba(255, 255, 255, 0.08)'}`
+                    background: selectedPaper?.id === p.id ? 'rgba(99, 102, 241, 0.15)' : 'var(--bg-tertiary)',
+                    border: `1px solid ${selectedPaper?.id === p.id ? '#dc2626' : 'var(--border)'}`
                   }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
                     <strong style={{ color: '#ffffff' }}>{p.paper_code || 'Past Paper'}</strong>
@@ -117,10 +117,10 @@ Misconception Taxonomy ({misconceptions.length})
                       {p.status}
                     </span>
                   </div>
-                  <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                     {p.exam_board} {p.subject} • {p.series || 'Series'}
                   </div>
-                  <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.35rem' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
                     {p.question_count || 0} questions extracted
                   </div>
                 </div>
@@ -131,10 +131,10 @@ Misconception Taxonomy ({misconceptions.length})
           {/* Selected Paper Details & Question Calibration */}
           {selectedPaper && paperDetails && (
             <div className="card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '1rem' }}>
                 <div>
                   <h2>{selectedPaper.exam_board} {selectedPaper.subject} - {selectedPaper.paper_code}</h2>
-                  <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Source: {selectedPaper.source_pdf_url}</p>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Source: {selectedPaper.source_pdf_url}</p>
                 </div>
                 {selectedPaper.status !== 'published' && (
                   <button onClick={() => handlePublishPaper(selectedPaper.id)} className="btn btn-primary">
@@ -149,16 +149,16 @@ Publish to Question Bank
                   <div key={q.id} style={{
                     padding: '1.25rem',
                     borderRadius: '8px',
-                    background: 'rgba(255, 255, 255, 0.02)',
-                    border: '1px solid rgba(255, 255, 255, 0.08)'
+                    background: 'var(--bg-tertiary)',
+                    border: '1px solid var(--border)'
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                       <div>
-                        <strong style={{ fontSize: '1.1rem', color: '#6366f1', marginRight: '0.5rem' }}>
+                        <strong style={{ fontSize: '1.1rem', color: '#dc2626', marginRight: '0.5rem' }}>
                           Q{q.question_number}
                         </strong>
                         <span style={{
-                          background: q.marking_type === 'dsl' ? '#4338ca' : '#92400e',
+                          background: q.marking_type === 'dsl' ? '#b91c1c' : '#92400e',
                           color: '#ffffff',
                           fontSize: '0.75rem',
                           padding: '0.15rem 0.4rem',
@@ -182,7 +182,7 @@ Publish to Question Bank
                     )}
 
                     {q.mark_scheme_text && (
-                      <div style={{ background: 'rgba(255,255,255,0.03)', padding: '0.5rem 0.75rem', borderRadius: '6px', fontSize: '0.85rem', color: '#94a3b8' }}>
+                      <div style={{ background: 'var(--bg-tertiary)', padding: '0.5rem 0.75rem', borderRadius: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                         <strong>Mark Scheme:</strong> {q.mark_scheme_text}
                       </div>
                     )}
@@ -197,7 +197,7 @@ Publish to Question Bank
       {activeTab === 'misconceptions' && (
         <div className="card">
           <h3 style={{ marginBottom: '1rem' }}>Canonical Misconception Taxonomy</h3>
-          <p style={{ color: '#94a3b8', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
             Pre-approved taxonomy of misconception tags per spec code. Ensures stable tags for student memory resolution.
           </p>
 
@@ -209,8 +209,8 @@ Publish to Question Bank
                 alignItems: 'center',
                 padding: '1rem',
                 borderRadius: '8px',
-                background: 'rgba(255, 255, 255, 0.03)',
-                border: '1px solid rgba(255, 255, 255, 0.05)'
+                background: 'var(--bg-tertiary)',
+                border: '1px solid var(--border)'
               }}>
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
@@ -218,9 +218,9 @@ Publish to Question Bank
                       Spec {m.spec_code}
                     </span>
                     <strong style={{ color: '#ffffff' }}>{m.label}</strong>
-                    <code style={{ fontSize: '0.8rem', color: '#94a3b8' }}>({m.tag_id})</code>
+                    <code style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>({m.tag_id})</code>
                   </div>
-                  <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>{m.description}</div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{m.description}</div>
                 </div>
 
                 <div>

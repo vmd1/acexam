@@ -13,7 +13,8 @@ async def run_full_ai_ingestion_pipeline(
     examiner_report_bytes: bytes | None = None,
     exam_board: str = "AQA",
     subject: str = "Biology",
-    spec_code: str = "4.2.1"
+    spec_code: str = "4.2.1",
+    known_topics: List[Dict[str, str]] | None = None
 ) -> Dict[str, Any]:
     """
     Coordinates the complete multi-modal AI Ingestion Pipeline (§3.1, §3.1a, §6.2, §6.2a):
@@ -33,7 +34,9 @@ async def run_full_ai_ingestion_pipeline(
         "proposed_misconceptions": [],
         "synthetic_training_dataset": []
     }
-    
+
+    ai_pipeline.reset_token_usage()
+
     # 1. Visual Content Extraction (PyMuPDF Dual Mode + Sanity Check)
     extracted_images = extract_all_visuals_from_pdf(question_paper_bytes)
     
@@ -75,7 +78,7 @@ async def run_full_ai_ingestion_pipeline(
     # found on a real AQA paper). Prefer AI-driven joint splitting, which
     # also isolates each question's own mark scheme text rather than the
     # whole document; fall back to regex if AI is unavailable/fails.
-    ai_questions = await ai_pipeline.split_paper_into_questions(full_text_pages, mark_scheme_text)
+    ai_questions = await ai_pipeline.split_paper_into_questions(full_text_pages, mark_scheme_text, known_topics)
     using_ai_split = bool(ai_questions)
     if using_ai_split:
         raw_questions = ai_questions
@@ -103,11 +106,30 @@ async def run_full_ai_ingestion_pipeline(
         # (catches both same-page diagrams and shared stem diagrams
         # introduced on an earlier page since the previous question);
         # otherwise fall back to the old "first image" placeholder.
-        if q_page is not None:
+        # Only attach when the AI flagged this question as actually
+        # referencing a figure/diagram/table - otherwise the page-range
+        # heuristic tends to attach unrelated images to text-only questions
+        # that merely share a page with a diagram for a neighbouring question.
+        references_figure = q.get("references_figure", True) if using_ai_split else True
+        if not references_figure:
+            q_images = []
+        elif q_page is not None:
             q_images = [img for img in extracted_images if prev_page <= img.get("page", 0) <= q_page]
-            prev_page = q_page
         else:
             q_images = extracted_images[:1] if extracted_images else []
+
+        if q_page is not None:
+            prev_page = q_page
+
+        # Caption images with the figure label this specific question uses
+        # to refer to them (e.g. "Figure 9"), extracted by the AI splitter
+        # from the question's own wording. A stem diagram can be shared by
+        # several sub-questions that each refer to it differently, so copy
+        # each image dict per-question rather than mutating the shared
+        # extracted_images entries.
+        figure_label = q.get("figure_label") if using_ai_split else _extract_figure_label(q["text"])
+        if figure_label:
+            q_images = [{**img, "caption": figure_label} for img in q_images]
 
         # Prefer the AI-isolated per-question mark scheme; fall back to the
         # whole document's mark scheme text if isolation didn't yield one.
@@ -137,7 +159,14 @@ async def run_full_ai_ingestion_pipeline(
             "marking_dsl": dsl,
             "mark_scheme_text": question_mark_scheme if question_mark_scheme else f"Official mark scheme rubric for Q{q['number']}",
             "images": q_images,
-            "needs_review": any(img.get("needs_review") for img in q_images)
+            "needs_review": any(img.get("needs_review") for img in q_images),
+            # Best-matching spec_topics.spec_code for this specific question,
+            # auto-classified by the AI splitter against the paper's known
+            # topic list. None if unclassified (falls back to the paper-level
+            # default spec_code chosen at upload time).
+            "topic_spec_code": q.get("topic_spec_code") if using_ai_split else None,
+            "answer_type": q.get("answer_type", "written") if using_ai_split else "written",
+            "answer_options": q.get("answer_options") if using_ai_split else None
         })
         
     # 7. Examiner Report Misconception Scanning (§6.2a)
@@ -146,8 +175,20 @@ async def run_full_ai_ingestion_pipeline(
         er_text = "\n\n".join([er_doc[i].get_text() for i in range(len(er_doc))])
         proposed_tags = await ai_pipeline.scan_examiner_report_for_misconceptions(er_text, spec_code)
         pipeline_results["proposed_misconceptions"] = proposed_tags
-        
+
+    pipeline_results["token_usage"] = ai_pipeline.get_token_usage()
+
     return pipeline_results
+
+_FIGURE_LABEL_RE = re.compile(r'\b(Fig(?:ure)?\.?\s*\d+[a-z]?)\b', re.IGNORECASE)
+
+def _extract_figure_label(text: str) -> str | None:
+    """Regex fallback for the legacy (non-AI) boundary-detection path -
+    pulls a "Figure 9" / "Fig. 2a" style reference straight out of the
+    question text so images still get a caption when the AI splitter is
+    unavailable."""
+    match = _FIGURE_LABEL_RE.search(text or "")
+    return match.group(1).strip() if match else None
 
 def detect_question_boundaries(text: str) -> List[Dict[str, str]]:
     """

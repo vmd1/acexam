@@ -4,6 +4,8 @@ from typing import Optional, List
 from dependencies import rate_limit, get_current_admin_id
 from database import get_db
 import ingestion
+import ai_pipeline
+import fitz
 import json
 
 router = APIRouter(dependencies=[Depends(rate_limit), Depends(get_current_admin_id)])
@@ -28,6 +30,7 @@ async def upload_paper(
     examiner_report_file: Optional[UploadFile] = File(None),
     exam_board: str = Form("AQA"),
     subject: str = Form("Biology"),
+    level: str = Form("GCSE"),
     paper_code: str = Form("8461/1H"),
     series: str = Form("June 2023"),
     spec_code: str = Form("4.2.1"),
@@ -40,7 +43,17 @@ async def upload_paper(
     qp_bytes = await file.read()
     ms_bytes = (await mark_scheme_file.read()) if mark_scheme_file else None
     er_bytes = (await examiner_report_file.read()) if examiner_report_file else None
-    
+
+    # Fetch this subject's known specification topics so the AI can classify
+    # each question against the real topic list instead of everything in the
+    # paper being tagged with one manually-typed spec_code.
+    async with db.acquire() as conn:
+        known_topic_rows = await conn.fetch(
+            'SELECT spec_code, title FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3',
+            exam_board, subject, level
+        )
+    known_topics = [{"spec_code": r["spec_code"], "title": r["title"]} for r in known_topic_rows]
+
     try:
         results = await ingestion.run_full_ai_ingestion_pipeline(
             question_paper_bytes=qp_bytes,
@@ -48,13 +61,14 @@ async def upload_paper(
             examiner_report_bytes=er_bytes,
             exam_board=exam_board,
             subject=subject,
-            spec_code=spec_code
+            spec_code=spec_code,
+            known_topics=known_topics
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Ingestion Pipeline failed: {str(e)}")
-        
+
     mock_s3_url = f"https://cdn.acexam.app/papers/{file.filename}"
-    
+
     async with db.acquire() as conn:
         # 1. Create Paper Record
         paper_id = await conn.fetchval('''
@@ -62,23 +76,35 @@ async def upload_paper(
             VALUES ($1, $2, $3, $4, $5, 'needs_review', $6)
             RETURNING id
         ''', exam_board, subject, paper_code, series, mock_s3_url, user_id)
-        
-        # 2. Find matching spec topic if available
-        topic_id = await conn.fetchval('SELECT id FROM spec_topics WHERE spec_code = $1', spec_code)
-        
-        # 3. Insert Extracted Questions
+
+        # 2. Fallback spec topic, used only for questions the AI couldn't classify
+        default_topic_id = await conn.fetchval(
+            'SELECT id FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3 AND spec_code = $4',
+            exam_board, subject, level, spec_code
+        )
+
+        # 3. Resolve each known topic's spec_code to its id, for per-question classification
+        topic_id_by_code = {r["spec_code"]: r["id"] for r in await conn.fetch(
+            'SELECT id, spec_code FROM spec_topics WHERE exam_board = $1 AND subject = $2 AND level = $3',
+            exam_board, subject, level
+        )}
+
+        # 4. Insert Extracted Questions
         for q in results.get("questions", []):
+            question_topic_id = topic_id_by_code.get(q.get("topic_spec_code"), default_topic_id)
             await conn.execute('''
                 INSERT INTO questions (
                     paper_id, question_number, mark_value, question_text,
                     images, marking_type, marking_dsl, mark_scheme_text,
-                    needs_review, spec_topic_id
+                    needs_review, spec_topic_id, answer_type, answer_options
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ''',
                 paper_id, q["question_number"], q["mark_value"], q["question_text"],
                 json.dumps(q.get("images", [])), q["marking_type"], q.get("marking_dsl"),
-                q.get("mark_scheme_text"), q.get("needs_review", False), topic_id
+                q.get("mark_scheme_text"), q.get("needs_review", False), question_topic_id,
+                q.get("answer_type", "written"),
+                json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None
             )
             
         # 4. Save Proposed Misconceptions (§6.2a)
@@ -97,7 +123,57 @@ async def upload_paper(
         "extracted_tables_count": len(results.get("tables", [])),
         "questions_extracted": len(results.get("questions", [])),
         "proposed_misconceptions_count": len(results.get("proposed_misconceptions", [])),
-        "synthetic_training_examples_count": len(results.get("synthetic_training_dataset", []))
+        "synthetic_training_examples_count": len(results.get("synthetic_training_dataset", [])),
+        "token_usage": results.get("token_usage", {})
+    }
+
+@router.post("/upload-spec")
+async def upload_specification(
+    file: UploadFile = File(...),
+    exam_board: str = Form("AQA"),
+    subject: str = Form("Biology"),
+    level: str = Form("GCSE"),
+    db=Depends(get_db)
+):
+    """
+    Pre-populates spec_topics from the official exam board specification
+    document, so the full topic hierarchy exists before any past paper is
+    ingested (rather than admins hand-typing one spec_code per paper upload).
+    """
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Specification must be a PDF file")
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    spec_bytes = await file.read()
+    doc = fitz.open(stream=spec_bytes, filetype="pdf")
+    spec_text = "\n\n".join(doc[i].get_text() for i in range(len(doc)))
+
+    topics = await ai_pipeline.extract_spec_topics_from_text(spec_text)
+    if not topics:
+        raise HTTPException(status_code=422, detail="Could not extract any topics from this specification document")
+
+    async with db.acquire() as conn:
+        code_to_id = {}
+        for t in topics:
+            topic_id = await conn.fetchval('''
+                INSERT INTO spec_topics (exam_board, subject, level, spec_code, title)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (exam_board, subject, level, spec_code) DO UPDATE SET title = EXCLUDED.title
+                RETURNING id
+            ''', exam_board, subject, level, t["spec_code"], t["title"])
+            code_to_id[t["spec_code"]] = topic_id
+
+        for t in topics:
+            if t.get("parent_spec_code") and t["parent_spec_code"] in code_to_id:
+                await conn.execute(
+                    'UPDATE spec_topics SET parent_id = $1 WHERE id = $2',
+                    code_to_id[t["parent_spec_code"]], code_to_id[t["spec_code"]]
+                )
+
+    return {
+        "message": "Specification parsed and topics created.",
+        "topics_created": len(topics)
     }
 
 @router.get("/papers")

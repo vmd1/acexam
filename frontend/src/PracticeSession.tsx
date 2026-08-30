@@ -1,9 +1,55 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import api from './api';
 import ExamCanvas from './ExamCanvas';
 import type { Question } from './types';
 
-export default function AdaptivePractice() {
+// Groups sub-questions that belong to the same parent question number
+// (e.g. "1(a)", "1(b)", "1(c)" or "01.1", "01.2") so they render together
+// on one page, matching how they appear on a real exam paper.
+function questionRootKey(qNum: string): string {
+  const match = qNum.match(/^0*(\d+)/);
+  return match ? match[1] : qNum;
+}
+
+function groupQuestions(questions: Question[]): Question[][] {
+  const order: string[] = [];
+  const map = new Map<string, Question[]>();
+  questions.forEach(q => {
+    // Scope grouping to the paper - two different papers can both have a
+    // "question 4", but those are unrelated and must never be merged.
+    const key = `${q.paper_id}::${questionRootKey(q.question_number || '')}`;
+    if (!map.has(key)) {
+      map.set(key, []);
+      order.push(key);
+    }
+    map.get(key)!.push(q);
+  });
+  return order.map(key =>
+    [...map.get(key)!].sort((a, b) =>
+      (a.question_number || '').localeCompare(b.question_number || '', undefined, { numeric: true })
+    )
+  );
+}
+
+interface CustomSessionState {
+  mode: 'custom';
+  subject: string;
+  examBoard: string;
+  topicIds: string[];
+}
+
+interface AdaptiveSessionState {
+  mode: 'adaptive';
+}
+
+type SessionState = CustomSessionState | AdaptiveSessionState;
+
+export default function PracticeSession() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const sessionConfig: SessionState = (location.state as SessionState) || { mode: 'adaptive' };
+
   const [questions, setQuestions] = useState<Question[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -12,15 +58,27 @@ export default function AdaptivePractice() {
   const [sessionScore, setSessionScore] = useState({ earned: 0, possible: 0 });
 
   useEffect(() => {
-    fetchAdaptiveQueue();
+    fetchQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchAdaptiveQueue = async () => {
+  const fetchQueue = async () => {
     setLoading(true);
     try {
-      const res = await api.get('/generate/adaptive-queue');
-      setQuestions(res.data.queue);
-      setFocusReason(res.data.focus_reason);
+      if (sessionConfig.mode === 'custom') {
+        const res = await api.post('/generate/custom-paper', {
+          subject: sessionConfig.subject,
+          exam_board: sessionConfig.examBoard,
+          spec_topic_ids: sessionConfig.topicIds,
+          target_marks: 20,
+        });
+        setQuestions(res.data.questions);
+        setFocusReason(null);
+      } else {
+        const res = await api.get('/generate/adaptive-queue');
+        setQuestions(res.data.queue);
+        setFocusReason(res.data.focus_reason);
+      }
       setCurrentIndex(0);
       setSessionCompleted(false);
       setSessionScore({ earned: 0, possible: 0 });
@@ -38,8 +96,10 @@ export default function AdaptivePractice() {
     }));
   };
 
+  const groups = useMemo(() => groupQuestions(questions), [questions]);
+
   const handleNext = () => {
-    if (currentIndex + 1 < questions.length) {
+    if (currentIndex + 1 < groups.length) {
       setCurrentIndex(prev => prev + 1);
     } else {
       setSessionCompleted(true);
@@ -49,8 +109,12 @@ export default function AdaptivePractice() {
   if (loading) {
     return (
       <div className="container" style={{ textAlign: 'center', marginTop: '4rem' }}>
-        <h2>Loading your personalized practice queue...</h2>
-        <p style={{ color: '#94a3b8' }}>Consulting Master Student Profile & Ebbinghaus decay curve...</p>
+        <h2>Loading your practice queue...</h2>
+        <p style={{ color: 'var(--text-secondary)' }}>
+          {sessionConfig.mode === 'adaptive'
+            ? 'Consulting Master Student Profile & Ebbinghaus decay curve...'
+            : `Gathering questions for ${sessionConfig.subject}...`}
+        </p>
       </div>
     );
   }
@@ -61,7 +125,7 @@ export default function AdaptivePractice() {
       <div className="container" style={{ maxWidth: '650px', marginTop: '3rem', textAlign: 'center' }}>
         <div className="card" style={{ padding: '3rem' }}>
           <h2 style={{ marginBottom: '0.5rem' }}>Practice Session Completed!</h2>
-          <p style={{ color: '#94a3b8', marginBottom: '2rem' }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>
             Your Master Student Profile has been updated with real-time EWMA mastery scores.
           </p>
 
@@ -69,28 +133,31 @@ export default function AdaptivePractice() {
             display: 'flex',
             justifyContent: 'center',
             gap: '2rem',
-            background: 'rgba(255, 255, 255, 0.05)',
+            background: 'var(--border)',
             padding: '1.5rem',
             borderRadius: '12px',
             marginBottom: '2rem'
           }}>
             <div>
-              <div style={{ fontSize: '2rem', fontWeight: 800, color: '#6366f1' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 800, color: '#dc2626' }}>
                 {sessionScore.earned} / {sessionScore.possible}
               </div>
-              <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Marks Earned</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Marks Earned</div>
             </div>
             <div>
               <div style={{ fontSize: '2rem', fontWeight: 800, color: pct >= 70 ? '#10b981' : '#f59e0b' }}>
                 {pct}%
               </div>
-              <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Accuracy</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Accuracy</div>
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-            <button onClick={fetchAdaptiveQueue} className="btn btn-primary">
+          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button onClick={fetchQueue} className="btn btn-primary">
               Start Another Queue
+            </button>
+            <button onClick={() => navigate('/app')} className="btn btn-outline">
+              Change Practice Setup
             </button>
             <a href="/analytics" className="btn btn-outline">
               View Analytics Heatmap
@@ -101,7 +168,7 @@ export default function AdaptivePractice() {
     );
   }
 
-  const currentQ = questions[currentIndex];
+  const currentGroup = groups[currentIndex];
 
   return (
     <div className="container" style={{ marginTop: '2rem', marginBottom: '4rem' }}>
@@ -115,14 +182,14 @@ export default function AdaptivePractice() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <span style={{
-            background: '#6366f1',
+            background: '#dc2626',
             color: '#ffffff',
             padding: '0.2rem 0.6rem',
             borderRadius: '6px',
             fontSize: '0.85rem',
             fontWeight: 700
           }}>
-            Question {currentIndex + 1} of {questions.length}
+            Question {currentIndex + 1} of {groups.length}
           </span>
           {focusReason && focusReason.active_misconceptions_count > 0 && (
             <span style={{
@@ -137,21 +204,24 @@ export default function AdaptivePractice() {
           )}
         </div>
 
-        <div style={{ color: '#94a3b8', fontSize: '0.9rem' }}>
+        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
           Session Score: <strong style={{ color: '#ffffff' }}>{sessionScore.earned} / {sessionScore.possible}</strong>
         </div>
       </div>
 
       {/* The Exam Paper Canvas */}
-      {currentQ ? (
+      {currentGroup && currentGroup.length > 0 ? (
         <ExamCanvas
-          question={currentQ}
+          questions={currentGroup}
           onAnswerSubmitted={handleAnswerSubmitted}
           onNext={handleNext}
         />
       ) : (
         <div className="card text-center" style={{ maxWidth: '600px', margin: '0 auto' }}>
-          <p>No questions currently available in this queue.</p>
+          <p>No questions currently available for this selection.</p>
+          <button onClick={() => navigate('/app')} className="btn btn-outline" style={{ marginTop: '1rem' }}>
+            Change Practice Setup
+          </button>
         </div>
       )}
     </div>

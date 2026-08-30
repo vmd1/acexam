@@ -1,3 +1,15 @@
+export type AnswerType = 'written' | 'select' | 'multi_select' | 'numeric' | 'grid_select';
+
+export interface AnswerOption {
+  key: string;
+  text: string;
+}
+
+export interface GridRow {
+  statement: string;
+  options: string[];
+}
+
 export interface Question {
   id: string;
   paper_id: string;
@@ -12,6 +24,21 @@ export interface Question {
   marking_dsl?: string;
   mark_scheme_text?: string;
   images?: any[];
+  answer_type?: AnswerType;
+  answer_options?: AnswerOption[] | GridRow[] | { unit: string | null } | null;
+  previous_answer?: PreviousAnswer | null;
+}
+
+export interface PreviousAnswer {
+  answer_text: string | null;
+  answer_image_url: string | null;
+  marks_awarded: number;
+  marks_possible: number;
+  feedback_text: string | null;
+  missed_points: string[] | string | null;
+  misconception_tags: string[] | string | null;
+  marked_by: string;
+  created_at: string | null;
 }
 
 export interface User {

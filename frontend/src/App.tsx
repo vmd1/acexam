@@ -1,16 +1,30 @@
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import api, { extractErrorMessage } from './api';
 import AdminIngestion from './AdminIngestion';
 import AdminReview from './AdminReview';
-import AdaptivePractice from './AdaptivePractice';
+import PracticeSetup from './PracticeSetup';
+import PracticeSession from './PracticeSession';
 import AnalyticsView from './AnalyticsView';
+import ManageAccount from './ManageAccount';
+import Onboarding from './Onboarding';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="container text-center" style={{ marginTop: '5rem' }}>Loading...</div>;
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+// Like ProtectedRoute, but also sends first-time users (no subjects added
+// yet) to the onboarding flow before they can reach practice/analytics.
+function RequireSubjects({ children }: { children: React.ReactNode }) {
+  const { user, loading, hasSubjects } = useAuth();
+  if (loading) return <div className="container text-center" style={{ marginTop: '5rem' }}>Loading...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (hasSubjects === null) return <div className="container text-center" style={{ marginTop: '5rem' }}>Loading...</div>;
+  if (hasSubjects === false) return <Navigate to="/onboarding" replace />;
   return <>{children}</>;
 }
 
@@ -20,6 +34,34 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   if (!user) return <Navigate to="/login" replace />;
   if (!user.is_admin) return <Navigate to="/app" replace />;
   return <>{children}</>;
+}
+
+type Theme = 'light' | 'dark';
+
+function getInitialTheme(): Theme {
+  const stored = localStorage.getItem('theme');
+  if (stored === 'light' || stored === 'dark') return stored;
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  return (
+    <button
+      onClick={() => setTheme(prev => (prev === 'light' ? 'dark' : 'light'))}
+      className="theme-toggle"
+      title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+      aria-label="Toggle color theme"
+    >
+      {theme === 'light' ? '🌙' : '☀️'}
+    </button>
+  );
 }
 
 function App() {
@@ -37,11 +79,12 @@ function App() {
             {user?.is_admin && <li><Link to="/admin/review">Admin Console</Link></li>}
           </ul>
           <div className="nav-auth-buttons">
+            <ThemeToggle />
             {user ? (
               <>
-                <span style={{ color: 'var(--text-secondary)', alignSelf: 'center', fontWeight: 600 }}>
+                <Link to="/account" style={{ color: 'var(--text-secondary)', alignSelf: 'center', fontWeight: 600 }}>
                   {user.display_name}
-                </span>
+                </Link>
                 <button onClick={logout} className="btn btn-outline" style={{ padding: '0.4rem 0.9rem' }}>
                   Logout
                 </button>
@@ -60,8 +103,11 @@ function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
-            <Route path="/app" element={<ProtectedRoute><AdaptivePractice /></ProtectedRoute>} />
-            <Route path="/analytics" element={<ProtectedRoute><AnalyticsView /></ProtectedRoute>} />
+            <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
+            <Route path="/app" element={<RequireSubjects><PracticeSetup /></RequireSubjects>} />
+            <Route path="/app/session" element={<RequireSubjects><PracticeSession /></RequireSubjects>} />
+            <Route path="/analytics" element={<RequireSubjects><AnalyticsView /></RequireSubjects>} />
+            <Route path="/account" element={<ProtectedRoute><ManageAccount /></ProtectedRoute>} />
             <Route path="/admin/ingestion" element={<AdminRoute><AdminIngestion /></AdminRoute>} />
             <Route path="/admin/review" element={<AdminRoute><AdminReview /></AdminRoute>} />
             <Route path="*" element={<NotFound />} />
@@ -100,7 +146,7 @@ function Login() {
     try {
       await api.post('/auth/login', { email, password });
       const userRes = await api.get('/auth/me');
-      login('cookie-managed', userRes.data);
+      await login('cookie-managed', userRes.data);
       navigate('/app');
     } catch (err: any) {
       setError(extractErrorMessage(err, 'Invalid email or password'));
@@ -141,8 +187,8 @@ function Register() {
       await api.post('/auth/register', { display_name: name, email, password });
       await api.post('/auth/login', { email, password });
       const userRes = await api.get('/auth/me');
-      login('cookie-managed', userRes.data);
-      navigate('/app');
+      await login('cookie-managed', userRes.data);
+      navigate('/onboarding');
     } catch (err: any) {
       setError(extractErrorMessage(err, 'Registration failed'));
     }

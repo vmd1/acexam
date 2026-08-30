@@ -18,7 +18,7 @@ async def get_analytics_profile(
         
         # 1. Topic Mastery Tree
         topics = await conn.fetch('''
-            SELECT st.id, st.spec_code, st.title, st.subject, st.exam_board,
+            SELECT st.id, st.spec_code, st.title, st.subject, st.exam_board, st.parent_id,
                    COALESCE(stm.mastery_score, 0.0) as mastery_score,
                    COALESCE(stm.decay_score, 0.0) as decay_score,
                    COALESCE(stm.attempts_count, 0) as attempts_count,

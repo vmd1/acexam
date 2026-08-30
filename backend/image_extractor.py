@@ -13,6 +13,24 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 # real-world PDF layout.
 MAX_IMAGES_PER_PAPER = 20
 
+# Formats every major browser can render in an <img> tag. PDFs commonly
+# embed images as JPEG2000 (jpx/jp2) or other formats PyMuPDF happily
+# extracts verbatim but that render as a broken image in the browser -
+# those get transcoded to PNG before saving.
+WEB_SAFE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+
+def _ensure_web_safe(image_bytes: bytes, ext: str) -> Tuple[bytes, str]:
+    if ext.lower() in WEB_SAFE_EXTENSIONS:
+        return image_bytes, ext
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue(), "png"
+    except Exception as e:
+        print(f"Failed to transcode non-web-safe image format '{ext}' to PNG: {e}")
+        return image_bytes, ext
+
 def _find_diagram_clusters(page) -> List["fitz.Rect"]:
     """
     Real exam PDFs are full of vector drawing primitives that are NOT
@@ -134,7 +152,8 @@ def extract_all_visuals_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                 base_image = doc.extract_image(xref)
                 image_bytes = base_image["image"]
                 ext = base_image.get("ext", "png")
-                
+                image_bytes, ext = _ensure_web_safe(image_bytes, ext)
+
                 # Check validity
                 valid, reason = is_image_valid_and_non_blank(image_bytes)
                 checksum = hashlib.sha256(image_bytes).hexdigest()
