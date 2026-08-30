@@ -12,6 +12,30 @@ function parseJsonMaybe<T>(value: T | string | null | undefined, fallback: T): T
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+// Unsubmitted work-in-progress (typed text, chosen mode, ink) is mirrored to
+// localStorage per question so it survives a full page reload, not just
+// in-app navigation (React state alone can't survive that). Wrapped in
+// try/catch since localStorage can throw (private browsing, quota) - a
+// draft just silently isn't saved rather than breaking the page.
+const DRAFT_TEXT_PREFIX = 'acexam_draft_text_';
+const DRAFT_MODE_PREFIX = 'acexam_draft_mode_';
+const DRAFT_CANVAS_PREFIX = 'acexam_draft_canvas_';
+
+function loadDraft(prefix: string, qid: string): string | null {
+  try { return localStorage.getItem(prefix + qid); } catch { return null; }
+}
+function saveDraft(prefix: string, qid: string, value: string) {
+  try { localStorage.setItem(prefix + qid, value); } catch { /* ignore */ }
+}
+function clearDraft(prefix: string, qid: string) {
+  try { localStorage.removeItem(prefix + qid); } catch { /* ignore */ }
+}
+function clearAllDrafts(qid: string) {
+  clearDraft(DRAFT_TEXT_PREFIX, qid);
+  clearDraft(DRAFT_MODE_PREFIX, qid);
+  clearDraft(DRAFT_CANVAS_PREFIX, qid);
+}
+
 interface ExamCanvasProps {
   questions: Question[];
   onAnswerSubmitted?: (result: any) => void;
@@ -38,6 +62,11 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
   const [submitErrors, setSubmitErrors] = useState<Record<string, string>>({});
 
   const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
+  // Tracks which questions' ink drafts have already been redrawn onto their
+  // canvas, so the restore effect below only paints once per question -
+  // otherwise every unrelated modes/markingResults change would re-fire it
+  // and stamp the last-saved snapshot back over newer unsaved strokes.
+  const restoredCanvasIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     // Reset all state whenever the question group changes, then restore
@@ -82,6 +111,19 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
       }
     });
 
+    // Overlay any locally-saved draft on top of the previous_answer prefill
+    // above - a draft is more recent than a possibly-stale previous_answer,
+    // and this is what lets an in-progress (never submitted) answer survive
+    // a full page reload. Skipped for a question already at full marks -
+    // there's nothing "in progress" left to restore over a done answer.
+    questions.forEach(q => {
+      if (initialResults[q.id]) return;
+      const draftText = loadDraft(DRAFT_TEXT_PREFIX, q.id);
+      if (draftText != null) initialAnswers[q.id] = draftText;
+      const draftMode = loadDraft(DRAFT_MODE_PREFIX, q.id);
+      if (draftMode === 'typed' || draftMode === 'canvas') initialModes[q.id] = draftMode;
+    });
+
     setModes(initialModes);
     setAnswerTexts(initialAnswers);
     setMarkingResults(initialResults);
@@ -90,6 +132,50 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupKey]);
 
+  // Mirror typed-answer drafts to localStorage as they change, so they
+  // survive a reload. Cleared once a question is marked - the real answer
+  // lives server-side (previous_answer) from that point on.
+  useEffect(() => {
+    questions.forEach(q => {
+      if (markingResults[q.id]) return;
+      const text = answerTexts[q.id];
+      if (text) saveDraft(DRAFT_TEXT_PREFIX, q.id, text);
+      else clearDraft(DRAFT_TEXT_PREFIX, q.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answerTexts]);
+
+  // Mirror the typed/canvas mode choice too, so a reload reopens the same
+  // input widget the student was using.
+  useEffect(() => {
+    questions.forEach(q => {
+      if (markingResults[q.id]) return;
+      const m = modes[q.id];
+      if (m) saveDraft(DRAFT_MODE_PREFIX, q.id, m);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modes]);
+
+  // Once a canvas question's draft is loaded and its <canvas> element
+  // exists, paint the saved ink back onto it so drawing can continue where
+  // it left off. Runs at most once per question (restoredCanvasIds) so a
+  // later, unrelated re-render can't stamp the old snapshot back over
+  // strokes drawn since the restore.
+  useEffect(() => {
+    questions.forEach(q => {
+      if (modes[q.id] !== 'canvas' || markingResults[q.id] || restoredCanvasIds.current.has(q.id)) return;
+      const draftCanvas = loadDraft(DRAFT_CANVAS_PREFIX, q.id);
+      const canvas = canvasRefs.current[q.id];
+      if (!draftCanvas || !canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      img.src = draftCanvas;
+      restoredCanvasIds.current.add(q.id);
+    });
+  });
+
   const clearCanvas = (qid: string) => {
     const canvas = canvasRefs.current[qid];
     if (canvas) {
@@ -97,6 +183,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         setHistory(prev => ({ ...prev, [qid]: [] }));
+        clearDraft(DRAFT_CANVAS_PREFIX, qid);
       }
     }
   };
@@ -158,6 +245,12 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
 
   const endStroke = (qid: string) => {
     setIsDrawing(prev => ({ ...prev, [qid]: false }));
+    // Snapshot after every completed stroke (not just on submit) so ink
+    // survives a reload too, matching the typed-answer draft above.
+    const canvas = canvasRefs.current[qid];
+    if (canvas && !markingResults[qid]) {
+      saveDraft(DRAFT_CANVAS_PREFIX, qid, canvas.toDataURL('image/png'));
+    }
   };
 
   const handleMouseDown = (qid: string) => (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -202,6 +295,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
     const previous = qHistory[qHistory.length - 1];
     ctx.putImageData(previous, 0, 0);
     setHistory(prev => ({ ...prev, [qid]: qHistory.slice(0, qHistory.length - 1) }));
+    if (!markingResults[qid]) saveDraft(DRAFT_CANVAS_PREFIX, qid, canvas.toDataURL('image/png'));
   };
 
   const toggleMultiSelect = (qid: string, key: string) => {
@@ -245,6 +339,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
       });
 
       setMarkingResults(prev => ({ ...prev, [qid]: res.data }));
+      clearAllDrafts(qid);
       if (onAnswerSubmitted) {
         onAnswerSubmitted(res.data);
       }

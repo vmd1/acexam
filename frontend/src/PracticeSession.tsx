@@ -13,6 +13,45 @@ function formatTime(totalSeconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// A reload loses React Router's in-memory location.state entirely, so
+// without this a refresh would call fetchQueue() again from scratch - for
+// a custom paper that means a brand-new random selection (the endpoint
+// isn't idempotent), silently orphaning the per-question drafts ExamCanvas
+// just saved. This mirrors the whole session shell (which questions, where
+// you were, your score/timer) to localStorage so a reload resumes the
+// exact same attempt instead of starting a different one.
+const SESSION_STORAGE_KEY = 'acexam_practice_session_v1';
+
+interface StoredSession {
+  // React Router's location.key identifies this specific navigation entry -
+  // stable across a reload of the same page, but a fresh value every time
+  // navigate() pushes a new entry (e.g. starting a genuinely different
+  // session). Comparing against it is what tells a reload of THIS session
+  // apart from the user having navigated to a new one since.
+  navKey: string;
+  questions: Question[];
+  currentIndex: number;
+  sessionScore: { earned: number; possible: number };
+  timeRemaining: number | null;
+}
+
+function loadStoredSession(): StoredSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredSession(s: StoredSession) {
+  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+function clearStoredSession() {
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+}
+
 // Groups sub-questions that belong to the same parent question number
 // (e.g. "1(a)", "1(b)", "1(c)" or "01.1", "01.2") so they render together
 // on one page, matching how they appear on a real exam paper.
@@ -69,9 +108,31 @@ export default function PracticeSession() {
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
 
   useEffect(() => {
-    fetchQueue();
+    const stored = loadStoredSession();
+    if (stored && stored.navKey === location.key) {
+      setQuestions(stored.questions);
+      setCurrentIndex(stored.currentIndex);
+      setSessionScore(stored.sessionScore);
+      setTimeRemaining(stored.timeRemaining);
+      setFocusReason(null);
+      setSessionCompleted(false);
+      setLoading(false);
+    } else {
+      fetchQueue();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keep the stored session in sync as the student progresses, so a reload
+  // at any point resumes exactly where they left off.
+  useEffect(() => {
+    if (loading || sessionCompleted || questions.length === 0) return;
+    saveStoredSession({ navKey: location.key, questions, currentIndex, sessionScore, timeRemaining });
+  }, [questions, currentIndex, sessionScore, timeRemaining, loading, sessionCompleted, location.key]);
+
+  useEffect(() => {
+    if (sessionCompleted) clearStoredSession();
+  }, [sessionCompleted]);
 
   // Custom papers carry a timer (real mock-exam feel); the adaptive queue
   // never sets timeRemaining, so this is a no-op there. It's a guide, not
