@@ -395,7 +395,15 @@ async def split_paper_into_questions(
 
     For each one, output:
     - question_number: the number/label as printed (e.g. "01.4", "3(b)(ii)")
-    - question_text: the full text of just that question/sub-question (not neighbouring questions, not headers/footers/instructions),
+    - stem_text: many exam questions open with shared context that every sub-question under it depends on -
+      an experiment/method description, a scenario, background data, or a passage - printed once above the
+      first sub-question (e.g. above "02.1") rather than repeated in each sub-question's own printed text.
+      If such context exists for this sub-question, reproduce it here in full (as Markdown, same formatting
+      rules as question_text below) - every sibling sub-question under the same stem gets the identical
+      stem_text. Use an empty string "" if this question has no shared introductory context (e.g. it's
+      entirely self-contained, or it IS the stem-setting text itself with no separate sub-parts).
+    - question_text: the full text of just that question/sub-question's OWN printed wording (not neighbouring
+      questions, not headers/footers/instructions, and not the shared context already captured in stem_text),
       formatted as Markdown:
         * Wrap the command word (Explain, Calculate, Describe, Evaluate, etc.) in **bold**.
         * If the question presents multiple-choice options (e.g. "A ... B ... C ... D ..." or "Tick one box"),
@@ -443,7 +451,7 @@ async def split_paper_into_questions(
     {topics_block}
     Ignore administrative/boilerplate text: "Do not write outside the box", print/version codes, blank answer lines, page numbers.
 
-    Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "...", "references_figure": true, "figure_label": "Figure 9", "topic_spec_code": "...", "answer_type": "written", "answer_options": null}}, ...]}}
+    Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "stem_text": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "...", "references_figure": true, "figure_label": "Figure 9", "topic_spec_code": "...", "answer_type": "written", "answer_options": null}}, ...]}}
 
     QUESTION PAPER:
     \"\"\"{numbered_pages[:80000]}\"\"\"
@@ -481,12 +489,14 @@ async def split_paper_into_questions(
                     page = 1
                 topic_spec_code = q.get("topic_spec_code")
                 figure_label = q.get("figure_label")
+                stem_text = str(q.get("stem_text") or "").strip()
                 answer_type, answer_options = _clean_answer_type_and_options(
                     q.get("answer_type"), q.get("answer_options")
                 )
                 cleaned.append({
                     "number": str(number).strip(),
                     "text": str(text).strip(),
+                    "stem_text": stem_text,
                     "mark_value": mark_val,
                     "page": page,
                     "mark_scheme_text": str(q.get("mark_scheme_text") or "").strip(),

@@ -151,11 +151,25 @@ async def run_full_ai_ingestion_pipeline(
         # whole document's mark scheme text if isolation didn't yield one.
         question_mark_scheme = per_question_scheme or mark_scheme_text
 
+        # Many sub-questions depend on shared context printed once above the
+        # group (an experiment/method description, a scenario, background
+        # data) rather than repeated in each sub-question's own wording -
+        # e.g. "Explain the results at 30C and at 90C" is meaningless without
+        # knowing which investigation it refers to. The AI splitter captures
+        # that as stem_text, identical across every sibling sub-question;
+        # fold it into this question's own working text (DSL compilation,
+        # synthetic answer generation, and what's actually stored/shown all
+        # need the same context a real student reading the paper would have)
+        # rather than losing it the way "just this sub-question's text"
+        # extraction used to.
+        stem_text = (q.get("stem_text") or "").strip() if using_ai_split else ""
+        full_text = f"{stem_text}\n\n{q['text']}" if stem_text else q["text"]
+
         # Compile Deterministic DSL for questions gradeable that way (1-2
         # marks, or a structured answer type at any mark value)
         dsl = None
         if marking_type == "dsl":
-            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(q["text"], mark_val, question_mark_scheme or q["text"], answer_type)
+            dsl = await ai_pipeline.compile_mark_scheme_to_dsl(full_text, mark_val, question_mark_scheme or full_text, answer_type)
 
         # Synthetic dataset generation for 3+ mark questions (§6.2). Tagged
         # with this specific question's own AI-classified topic rather than
@@ -163,7 +177,7 @@ async def run_full_ai_ingestion_pipeline(
         synthetic_examples = []
         if marking_type == "ai":
             synthetic_result = await ai_pipeline.generate_and_validate_synthetic_answers(
-                question_text=q["text"],
+                question_text=full_text,
                 mark_value=mark_val,
                 mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
                 spec_code=(q.get("topic_spec_code") if using_ai_split else None) or "",
@@ -185,7 +199,7 @@ async def run_full_ai_ingestion_pipeline(
         pipeline_results["questions"].append({
             "question_number": q["number"],
             "mark_value": mark_val,
-            "question_text": q["text"],
+            "question_text": full_text,
             "marking_type": marking_type,
             "marking_dsl": dsl,
             "mark_scheme_text": question_mark_scheme if question_mark_scheme else f"Official mark scheme rubric for Q{q['number']}",
