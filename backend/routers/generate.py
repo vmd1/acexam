@@ -64,6 +64,38 @@ MASTERY_EXCLUSION_SQL = '''NOT EXISTS (
     WHERE a.question_id = q.id AND a.user_id = $1 AND a.marks_awarded = a.marks_possible
 )'''
 
+# A custom paper is meant to feel like a fresh timed mock exam rather than a
+# revision drill, so - unlike the adaptive queue's MASTERY_EXCLUSION_SQL,
+# which only excludes a question once fully mastered - any question with
+# ANY prior attempt at all (even an unfinished/partial one) is excluded
+# from candidate selection.
+NOT_ATTEMPTED_SQL = '''NOT EXISTS (
+    SELECT 1 FROM answers a
+    WHERE a.question_id = q.id AND a.user_id = $1
+)'''
+
+
+async def _drop_groups_with_attempted_siblings(conn, user_id, rows):
+    """_expand_to_full_groups can pull an already-attempted sibling back
+    into a group (e.g. 08.1 was answered, 08.2 wasn't, but both belong to
+    the same stem) - intentional for the adaptive queue so a group renders
+    complete, but wrong for a custom paper, which should never resurface a
+    stem the student has partly done. Drop the whole (paper_id, root) group
+    in that case instead of serving a mixed fresh/already-done group."""
+    if not rows:
+        return []
+    question_ids = [r['id'] for r in rows]
+    attempted_rows = await conn.fetch(
+        'SELECT DISTINCT question_id FROM answers WHERE user_id = $1 AND question_id = ANY($2)',
+        user_id, question_ids
+    )
+    attempted_ids = {r['question_id'] for r in attempted_rows}
+    tainted_groups = {
+        (r['paper_id'], _question_root(r['question_number']))
+        for r in rows if r['id'] in attempted_ids
+    }
+    return [r for r in rows if (r['paper_id'], _question_root(r['question_number'])) not in tainted_groups]
+
 
 async def _attach_previous_answers(conn, user_id, rows):
     """Attach each question's most recent answer (if any) so the frontend
@@ -230,7 +262,7 @@ async def generate_custom_paper(
             user_id, req.exam_board, req.subject
         )
 
-        conditions = [MASTERY_EXCLUSION_SQL, "p.status = 'published'", "p.subject = $2"]
+        conditions = [NOT_ATTEMPTED_SQL, "p.status = 'published'", "p.subject = $2"]
         params = [user_id, req.subject]
 
         if req.exam_board:
@@ -255,7 +287,13 @@ async def generate_custom_paper(
         '''
 
         questions = await conn.fetch(query, *params)
+        # _expand_to_full_groups mirrors the adaptive queue's grouping rules
+        # exactly (same helper, same max_groups) so a stem never renders
+        # with early sub-parts missing - then, unlike the adaptive queue,
+        # drop any whole group an expansion pulled an attempted sibling into,
+        # since this is meant to read as a fresh paper, not a revision drill.
         questions = await _expand_to_full_groups(conn, questions, max_groups=6)
+        questions = await _drop_groups_with_attempted_siblings(conn, user_id, questions)
         questions = await _attach_previous_answers(conn, user_id, questions)
 
         attempt_id = await conn.fetchval('''
@@ -263,9 +301,17 @@ async def generate_custom_paper(
             VALUES ($1, NULL, 'custom_generated')
             RETURNING id
         ''', user_id)
-        
+
+        # ~1 minute per mark is the standard GCSE exam-technique rule of
+        # thumb (matches real papers' own allowances closely enough, e.g.
+        # AQA Combined Science 1h15/70 marks), with a floor so a thin
+        # selection still gets a sane minimum timer.
+        total_marks = sum(q['mark_value'] for q in questions)
+        time_limit_seconds = max(total_marks * 60, 600)
+
         return {
             "attempt_id": str(attempt_id),
             "title": f"Custom {req.subject} Mock Paper",
-            "questions": questions
+            "questions": questions,
+            "time_limit_seconds": time_limit_seconds
         }

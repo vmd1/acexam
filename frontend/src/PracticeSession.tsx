@@ -5,7 +5,13 @@ import ExamCanvas from './ExamCanvas';
 import type { Question } from './types';
 import Spinner from './Spinner';
 import EmptyState from './EmptyState';
-import { AlertTriangle, ClipboardX, Trophy } from 'lucide-react';
+import { AlertTriangle, ClipboardX, Timer, Trophy } from 'lucide-react';
+
+function formatTime(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 // Groups sub-questions that belong to the same parent question number
 // (e.g. "1(a)", "1(b)", "1(c)" or "01.1", "01.2") so they render together
@@ -59,11 +65,23 @@ export default function PracticeSession() {
   const [focusReason, setFocusReason] = useState<any>(null);
   const [sessionCompleted, setSessionCompleted] = useState(false);
   const [sessionScore, setSessionScore] = useState({ earned: 0, possible: 0 });
+  const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
 
   useEffect(() => {
     fetchQueue();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Custom papers carry a timer (real mock-exam feel); the adaptive queue
+  // never sets timeRemaining, so this is a no-op there. It's a guide, not
+  // an enforcer - hitting 0 just switches the chip to "Time's up" rather
+  // than forcing the session to end, since a student mid-answer shouldn't
+  // get cut off.
+  useEffect(() => {
+    if (timeRemaining === null || sessionCompleted || timeRemaining <= 0) return;
+    const id = setTimeout(() => setTimeRemaining(t => (t !== null ? t - 1 : t)), 1000);
+    return () => clearTimeout(id);
+  }, [timeRemaining, sessionCompleted]);
 
   const fetchQueue = async () => {
     setLoading(true);
@@ -77,10 +95,12 @@ export default function PracticeSession() {
         });
         setQuestions(res.data.questions);
         setFocusReason(null);
+        setTimeRemaining(res.data.time_limit_seconds ?? null);
       } else {
         const res = await api.get('/generate/adaptive-queue');
         setQuestions(res.data.queue);
         setFocusReason(res.data.focus_reason);
+        setTimeRemaining(null);
       }
       setCurrentIndex(0);
       setSessionCompleted(false);
@@ -206,6 +226,24 @@ export default function PracticeSession() {
             }}>
               <AlertTriangle size={13} aria-hidden="true" />
               Targeting {focusReason.active_misconceptions_count} active misconception(s)
+            </span>
+          )}
+          {timeRemaining !== null && (
+            <span style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.3rem',
+              background: timeRemaining <= 120 ? 'var(--danger-bg)' : 'var(--bg-tertiary)',
+              color: timeRemaining <= 120 ? 'var(--danger)' : 'var(--text-primary)',
+              border: timeRemaining <= 120 ? 'none' : '1px solid var(--border)',
+              padding: '0.2rem 0.6rem',
+              borderRadius: '6px',
+              fontSize: '0.85rem',
+              fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums'
+            }}>
+              <Timer size={13} aria-hidden="true" />
+              {timeRemaining > 0 ? formatTime(timeRemaining) : "Time's up"}
             </span>
           )}
         </div>
