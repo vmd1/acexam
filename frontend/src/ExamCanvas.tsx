@@ -16,12 +16,13 @@ interface ExamCanvasProps {
   questions: Question[];
   onAnswerSubmitted?: (result: any) => void;
   onNext?: () => void;
+  nextLabel?: string;
 }
 
 type Mode = 'typed' | 'canvas';
 type Tool = 'pen' | 'highlighter' | 'eraser';
 
-export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: ExamCanvasProps) {
+export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextLabel = 'Next question' }: ExamCanvasProps) {
   const groupKey = questions.map(q => q.id).join('|');
 
   const [modes, setModes] = useState<Record<string, Mode>>({});
@@ -889,7 +890,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext }: Exa
               fontSize: '0.95rem',
               cursor: 'pointer'
             }}>
-            Next question
+            {nextLabel}
             <ArrowRight size={16} aria-hidden="true" />
           </button>
         </div>

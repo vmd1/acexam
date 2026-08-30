@@ -5,7 +5,7 @@ import ExamCanvas from './ExamCanvas';
 import type { Question } from './types';
 import Spinner from './Spinner';
 import EmptyState from './EmptyState';
-import { AlertTriangle, ClipboardX, Timer, Trophy } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardX, Flag, Timer, Trophy } from 'lucide-react';
 
 function formatTime(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60);
@@ -122,13 +122,13 @@ export default function PracticeSession() {
 
   const groups = useMemo(() => groupQuestions(questions), [questions]);
 
-  const handleNext = () => {
-    if (currentIndex + 1 < groups.length) {
-      setCurrentIndex(prev => prev + 1);
-    } else {
-      setSessionCompleted(true);
-    }
-  };
+  // Navigation is free in both directions and never requires answering the
+  // current question first - each group's ExamCanvas instance stays mounted
+  // (just hidden) so moving away and back never loses unsubmitted typing or
+  // ink. Finishing the session is a separate, explicit action.
+  const goNext = () => setCurrentIndex(prev => Math.min(prev + 1, groups.length - 1));
+  const goPrev = () => setCurrentIndex(prev => Math.max(prev - 1, 0));
+  const finishSession = () => setSessionCompleted(true);
 
   if (loading) {
     return (
@@ -191,8 +191,6 @@ export default function PracticeSession() {
     );
   }
 
-  const currentGroup = groups[currentIndex];
-
   return (
     <div className="container" style={{ marginTop: '2rem', marginBottom: '4rem' }}>
       {/* Session Progress Header */}
@@ -249,18 +247,57 @@ export default function PracticeSession() {
           )}
         </div>
 
-        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-          Score: <strong style={{ color: 'var(--text-primary)' }}>{sessionScore.earned} / {sessionScore.possible}</strong>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              className="btn btn-outline"
+              onClick={goPrev}
+              disabled={currentIndex === 0}
+              aria-label="Previous question"
+              style={{ padding: '0.3rem 0.6rem' }}
+            >
+              <ChevronLeft size={16} aria-hidden="true" />
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={goNext}
+              disabled={currentIndex >= groups.length - 1}
+              aria-label="Next question"
+              style={{ padding: '0.3rem 0.6rem' }}
+            >
+              <ChevronRight size={16} aria-hidden="true" />
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={finishSession}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.3rem 0.7rem' }}
+            >
+              <Flag size={14} aria-hidden="true" />
+              Finish
+            </button>
+          </div>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            Score: <strong style={{ color: 'var(--text-primary)' }}>{sessionScore.earned} / {sessionScore.possible}</strong>
+          </div>
         </div>
       </div>
 
-      {/* The Exam Paper Canvas */}
-      {currentGroup && currentGroup.length > 0 ? (
-        <ExamCanvas
-          questions={currentGroup}
-          onAnswerSubmitted={handleAnswerSubmitted}
-          onNext={handleNext}
-        />
+      {/* The Exam Paper Canvas. Every group's ExamCanvas stays mounted (just
+          hidden) rather than swapping which group's props feed one shared
+          instance, so navigating away and back never resets a group's
+          unsubmitted typing/ink - each instance keeps its own local state
+          for as long as the session lasts. */}
+      {groups.length > 0 ? (
+        groups.map((group, index) => (
+          <div key={group.map(q => q.id).join('|')} style={{ display: index === currentIndex ? 'block' : 'none' }}>
+            <ExamCanvas
+              questions={group}
+              onAnswerSubmitted={handleAnswerSubmitted}
+              onNext={index < groups.length - 1 ? goNext : finishSession}
+              nextLabel={index < groups.length - 1 ? 'Next question' : 'Finish session'}
+            />
+          </div>
+        ))
       ) : (
         <div style={{ maxWidth: '600px', margin: '0 auto' }} className="card">
           <EmptyState
