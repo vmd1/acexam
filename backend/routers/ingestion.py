@@ -75,20 +75,36 @@ async def upload_paper(
         )
     known_topics = [{"spec_code": r["spec_code"], "title": r["title"]} for r in known_topic_rows]
 
-    # Approved misconception tags in scope for this qualification (§6.2a) -
-    # the independent grader (§6.2) may only choose from these, never invent
-    # its own phrasing. A brand-new spec code with nothing approved yet just
-    # gets an empty list, which is fine - it means no misconception_tags get
-    # attached to this batch's training examples, not that grading fails.
+    # Misconception taxonomy in scope for this qualification (§6.2a). Two
+    # different views of the same table, for two different jobs:
+    # - known_misconceptions (approved only): the independent grader (§6.2)
+    #   may only *attach* one of these to a training example - never invent
+    #   its own phrasing there, since an unapproved tag isn't trustworthy
+    #   enough to label training data with yet.
+    # - existing_taxonomy (approved + pending): grounds both the grader's
+    #   new_tag_suggestion and the mark-scheme/examiner-report scanner so
+    #   neither re-proposes a misconception that's already been surfaced,
+    #   even while still pending approval.
+    # A brand-new spec code with nothing in either list yet is fine - it
+    # just means nothing gets attached/deduped against, not that anything
+    # fails.
     known_codes = [t["spec_code"] for t in known_topics]
     known_misconceptions = []
+    existing_taxonomy = []
     if known_codes:
         async with db.acquire() as conn:
-            misconception_rows = await conn.fetch(
-                'SELECT tag_id, label FROM misconception_taxonomy WHERE spec_code = ANY($1) AND approved_at IS NOT NULL',
+            taxonomy_rows = await conn.fetch(
+                'SELECT tag_id, label, description, spec_code, approved_at FROM misconception_taxonomy WHERE spec_code = ANY($1)',
                 known_codes
             )
-        known_misconceptions = [{"tag_id": r["tag_id"], "label": r["label"]} for r in misconception_rows]
+        existing_taxonomy = [
+            {"tag_id": r["tag_id"], "label": r["label"], "description": r["description"], "spec_code": r["spec_code"]}
+            for r in taxonomy_rows
+        ]
+        known_misconceptions = [
+            {"tag_id": r["tag_id"], "label": r["label"]}
+            for r in taxonomy_rows if r["approved_at"] is not None
+        ]
 
     try:
         results = await ingestion.run_full_ai_ingestion_pipeline(
@@ -98,7 +114,8 @@ async def upload_paper(
             exam_board=exam_board,
             subject=subject,
             known_topics=known_topics,
-            known_misconceptions=known_misconceptions
+            known_misconceptions=known_misconceptions,
+            existing_taxonomy=existing_taxonomy
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Ingestion Pipeline failed: {str(e)}")

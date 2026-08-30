@@ -789,7 +789,12 @@ def _coerce_dsl_to_string(dsl: Any, fallback: str) -> str:
 
     return fallback
 
-async def scan_text_for_misconceptions(source_text: str, source_label: str, known_topics: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+async def scan_text_for_misconceptions(
+    source_text: str,
+    source_label: str,
+    known_topics: List[Dict[str, str]],
+    existing_tags: List[Dict[str, str]] | None = None
+) -> List[Dict[str, Any]]:
     """
     §6.2a Misconception Scanner for Proposing Canonical Misconception Tags.
 
@@ -805,8 +810,19 @@ async def scan_text_for_misconceptions(source_text: str, source_label: str, know
     forced under one code. A misconception the model can't confidently place
     on the list is dropped by the caller (misconception_taxonomy.spec_code
     is NOT NULL, so there's no safe default to fall back to).
+
+    `existing_tags` is the taxonomy already proposed or approved for these
+    topics (label + description, not just tag_id) - grounding the model
+    against it is what §6.2a's "checked for semantic overlap against
+    existing tags" step actually means. Without this, each scan is blind to
+    every other scan that ever ran, so the same underlying misconception
+    keeps getting re-invented under a slightly different tag_id/phrasing
+    every time a new document is scanned (e.g. "unit_conversion_cm_to_um_error"
+    and "unit_conversion_cm_to_mum" both getting proposed from two different
+    papers) - a tag_id-exact-match dedup at insert time can't catch that.
     """
     topics_list = "\n".join(f"- {t['spec_code']}: {t['title']}" for t in known_topics) if known_topics else "(none available)"
+    existing_list = "\n".join(f"- {t['tag_id']}: {t['label']} - {t['description']}" for t in existing_tags) if existing_tags else "(none proposed yet for this specification)"
     prompt = f"""
     Analyze this {source_label} text:
     \"\"\"{source_text[:4000]}\"\"\"
@@ -815,8 +831,19 @@ async def scan_text_for_misconceptions(source_text: str, source_label: str, know
     scheme, these typically show up as "do not accept", "common error", or "credit is not
     given for" style annotations rather than prose commentary.
 
-    For each one, classify it against this specification's topic list by choosing the
-    single best-matching spec_code from the list below, or null if none clearly apply:
+    This specification's misconception taxonomy already contains these tags (approved or
+    pending admin approval):
+    {existing_list}
+
+    Before proposing a new tag, check it against that list. If a mistake you find is the
+    same underlying misconception as one already there - even if this text describes it
+    using different words or a different example - do NOT propose it again; that
+    misconception is already covered. Only propose a tag for a mistake that is genuinely
+    distinct from everything already listed.
+
+    For each new tag you do propose, classify it against this specification's topic list by
+    choosing the single best-matching spec_code from the list below, or null if none clearly
+    apply:
     {topics_list}
 
     Output ONLY a flat JSON object with exactly this shape (field names must
@@ -827,20 +854,22 @@ async def scan_text_for_misconceptions(source_text: str, source_label: str, know
     """
     res = await call_llm(prompt, temperature=0.2)
     known_codes = {t["spec_code"] for t in known_topics} if known_topics else set()
+    existing_ids = {t["tag_id"] for t in existing_tags} if existing_tags else set()
     try:
         data = json.loads(res)
         tags = _extract_list(data, "proposed_tags")
     except Exception:
         return []
 
-    return [t for t in tags if isinstance(t, dict) and t.get("spec_code") in known_codes]
+    return [t for t in tags if isinstance(t, dict) and t.get("spec_code") in known_codes and t.get("tag_id") not in existing_ids]
 
 async def blind_grade_synthetic_answer(
     question_text: str,
     mark_value: int,
     mark_scheme: str,
     candidate_answer: str,
-    known_misconceptions: List[Dict[str, str]] | None = None
+    known_misconceptions: List[Dict[str, str]] | None = None,
+    spec_code: str = ""
 ) -> Dict[str, Any]:
     """
     §6.2 Independent auto-grading: a *separate* hosted-API call from the one
@@ -852,10 +881,19 @@ async def blind_grade_synthetic_answer(
     feedback_text, missed_points, misconception_tags), so an accepted
     example is already in the right shape for JSONL assembly later.
 
-    misconception_tags are constrained to the approved taxonomy passed in
-    (empty list if a spec code has no approved tags yet) rather than letting
-    the model invent free-text tags - per §6.2a, an unconstrained tag can't
-    be matched reliably across attempts.
+    misconception_tags (the label actually attached to the training
+    example/answer) are constrained to the approved taxonomy passed in -
+    per §6.2a, an unconstrained tag can't be matched reliably across
+    attempts. But a real answer can absolutely reveal a misconception
+    nothing in the taxonomy covers yet (the taxonomy today is seeded only
+    from mark-scheme/examiner-report text - a mistake that only shows up in
+    how students actually answer, never phrased explicitly in either
+    document, would otherwise just be silently dropped every time). So the
+    grader may separately propose ONE new candidate tag via
+    `new_tag_suggestion` when it hits a genuine, confidently-identifiable
+    misconception with no matching approved tag - this feeds the same
+    admin-approval queue as the mark-scheme/examiner-report scanner
+    (§6.2a), not the constrained `misconception_tags` list itself.
     """
     tags_list = "\n".join(f"- {t['tag_id']}: {t['label']}" for t in known_misconceptions) if known_misconceptions else "(none approved yet)"
     known_ids = {t["tag_id"] for t in known_misconceptions} if known_misconceptions else set()
@@ -870,13 +908,21 @@ async def blind_grade_synthetic_answer(
 
     If the answer reveals a conceptual misconception, choose the single best-matching tag
     from this approved list (omit misconception_tags entirely if none clearly fit - never
-    invent a tag not on this list):
+    put a tag not on this list into misconception_tags):
     {tags_list}
+
+    If the answer reveals a genuine, clearly identifiable misconception that does NOT
+    match any tag above closely enough, propose ONE new candidate tag for it via
+    new_tag_suggestion instead of forcing a bad match into misconception_tags or ignoring
+    it. Only do this when you are confident it is a real, recurring-type conceptual error -
+    not simply "the answer was wrong", a one-off slip, or task-specific carelessness. Use
+    null for new_tag_suggestion when nothing meets that bar.
 
     Output ONLY a flat JSON object with exactly this shape (field names must match exactly):
     {{"marks_awarded": <integer 0 to {mark_value}>, "feedback_text": "<brief examiner-style feedback>",
       "missed_points": ["<mark scheme point not evidenced in the answer>", ...],
-      "misconception_tags": ["<tag_id from the approved list>", ...]}}
+      "misconception_tags": ["<tag_id from the approved list>", ...],
+      "new_tag_suggestion": {{"tag_id": "<snake_case_id>", "label": "<short title>", "description": "<precise description>"}} or null}}
     """
     res = await call_llm(prompt, temperature=0.1)
     try:
@@ -888,15 +934,27 @@ async def blind_grade_synthetic_answer(
         marks = max(0, min(marks, mark_value))
         missed = [str(m) for m in data.get("missed_points", [])] if isinstance(data.get("missed_points"), list) else []
         tags = [t for t in data.get("misconception_tags", []) if isinstance(t, str) and t in known_ids] if isinstance(data.get("misconception_tags"), list) else []
+
+        new_tag = None
+        suggestion = data.get("new_tag_suggestion")
+        if isinstance(suggestion, dict) and suggestion.get("tag_id") and suggestion.get("label") and suggestion.get("description"):
+            new_tag = {
+                "tag_id": str(suggestion["tag_id"]).strip(),
+                "label": str(suggestion["label"]).strip(),
+                "description": str(suggestion["description"]).strip(),
+                "spec_code": spec_code,
+            }
+
         return {
             "marks_awarded": marks,
             "feedback_text": str(data.get("feedback_text", "") or ""),
             "missed_points": missed,
             "misconception_tags": tags,
+            "new_tag_suggestion": new_tag,
         }
     except Exception as e:
         print(f"Independent auto-grading error: {e}")
-        return {"marks_awarded": 0, "feedback_text": "", "missed_points": [], "misconception_tags": []}
+        return {"marks_awarded": 0, "feedback_text": "", "missed_points": [], "misconception_tags": [], "new_tag_suggestion": None}
 
 async def generate_and_validate_synthetic_answers(
     question_text: str,
@@ -904,13 +962,18 @@ async def generate_and_validate_synthetic_answers(
     mark_scheme: str,
     spec_code: str,
     known_misconceptions: List[Dict[str, str]] | None = None
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     §6.2 Synthetic Training Data Generation & Auto-Grading Cross-Check:
     1. Generates candidate synthetic answers targeting specific marks.
     2. Runs blind_grade_synthetic_answer as a genuinely independent second
        call per candidate (never told the target level).
     3. Cross-checks: accepted if target and awarded agree within tolerance.
+
+    Returns {"examples": [...], "proposed_tags": [...]} - "proposed_tags"
+    collects any new_tag_suggestion the grader surfaced across the 3
+    candidates (§6.2a feedback loop: a misconception can be discovered by
+    grading an answer, not just by scanning a mark scheme/examiner report).
     """
     prompt = f"""
     Generate 3 distinct synthetic student answers for:
@@ -933,6 +996,8 @@ async def generate_and_validate_synthetic_answers(
     """
     res = await call_llm(prompt, temperature=0.4)
     accepted_examples = []
+    proposed_tags_by_id: Dict[str, Dict[str, Any]] = {}
+    known_ids = {t["tag_id"] for t in known_misconceptions} if known_misconceptions else set()
 
     try:
         data = json.loads(res)
@@ -952,7 +1017,8 @@ async def generate_and_validate_synthetic_answers(
                 mark_value=mark_value,
                 mark_scheme=mark_scheme,
                 candidate_answer=ans,
-                known_misconceptions=known_misconceptions
+                known_misconceptions=known_misconceptions,
+                spec_code=spec_code
             )
             awarded = grade["marks_awarded"]
 
@@ -968,7 +1034,11 @@ async def generate_and_validate_synthetic_answers(
                 "missed_points": grade["missed_points"],
                 "misconception_tags": grade["misconception_tags"],
             })
+
+            new_tag = grade.get("new_tag_suggestion")
+            if new_tag and new_tag["tag_id"] not in known_ids:
+                proposed_tags_by_id[new_tag["tag_id"]] = new_tag
     except Exception as e:
         print(f"Synthetic generation error: {e}")
 
-    return accepted_examples
+    return {"examples": accepted_examples, "proposed_tags": list(proposed_tags_by_id.values())}

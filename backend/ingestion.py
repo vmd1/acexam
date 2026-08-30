@@ -14,7 +14,8 @@ async def run_full_ai_ingestion_pipeline(
     exam_board: str = "AQA",
     subject: str = "Biology",
     known_topics: List[Dict[str, str]] | None = None,
-    known_misconceptions: List[Dict[str, str]] | None = None
+    known_misconceptions: List[Dict[str, str]] | None = None,
+    existing_taxonomy: List[Dict[str, str]] | None = None
 ) -> Dict[str, Any]:
     """
     Coordinates the complete multi-modal AI Ingestion Pipeline (§3.1, §3.1a, §6.2, §6.2a):
@@ -88,6 +89,7 @@ async def run_full_ai_ingestion_pipeline(
         raw_questions = [{"number": "1(a)", "text": full_text[:400] if full_text else "Sample Question"}]
 
     prev_page = 1
+    misconceptions_from_grading: Dict[str, Dict[str, Any]] = {}
     for idx, q in enumerate(raw_questions):
         if using_ai_split:
             mark_val = q["mark_value"]
@@ -160,19 +162,25 @@ async def run_full_ai_ingestion_pipeline(
         # one admin-typed spec_code for the whole paper.
         synthetic_examples = []
         if marking_type == "ai":
-            synthetic_examples = await ai_pipeline.generate_and_validate_synthetic_answers(
+            synthetic_result = await ai_pipeline.generate_and_validate_synthetic_answers(
                 question_text=q["text"],
                 mark_value=mark_val,
                 mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
                 spec_code=(q.get("topic_spec_code") if using_ai_split else None) or "",
                 known_misconceptions=known_misconceptions or []
             )
+            synthetic_examples = synthetic_result["examples"]
             # Tag each example with its own question's number so the caller
             # can resolve it to a question_id once questions are inserted
             # (this pipeline runs before any DB insert, so no id exists yet).
             for ex in synthetic_examples:
                 ex["question_number"] = q["number"]
             pipeline_results["synthetic_training_dataset"].extend(synthetic_examples)
+            # New misconception tags the grader surfaced while marking a
+            # synthetic answer (§6.2a feedback loop) - merged into the same
+            # admin-approval queue as the document-scanning path below.
+            for new_tag in synthetic_result["proposed_tags"]:
+                misconceptions_from_grading.setdefault(new_tag["tag_id"], new_tag)
 
         pipeline_results["questions"].append({
             "question_number": q["number"],
@@ -198,15 +206,23 @@ async def run_full_ai_ingestion_pipeline(
     # proposed twice. A mark scheme alone often reveals common wrong answers
     # via its "do not accept"/"common error" annotations even with no
     # separate examiner report uploaded.
-    proposed_by_tag: Dict[str, Dict[str, Any]] = {}
+    # Ground each scan against everything already known for this
+    # specification - both what was already in the DB before this upload
+    # (existing_taxonomy) and whatever grading synthetic answers just
+    # surfaced above in this same run - so the document scan doesn't
+    # re-propose a misconception under a new tag_id/phrasing (§6.2a).
+    proposed_by_tag: Dict[str, Dict[str, Any]] = dict(misconceptions_from_grading)
+    scan_context = list(existing_taxonomy or []) + list(misconceptions_from_grading.values())
     if mark_scheme_text:
-        for tag in await ai_pipeline.scan_text_for_misconceptions(mark_scheme_text, "mark scheme", known_topics or []):
+        for tag in await ai_pipeline.scan_text_for_misconceptions(mark_scheme_text, "mark scheme", known_topics or [], existing_tags=scan_context):
             proposed_by_tag[tag["tag_id"]] = tag
+            scan_context.append(tag)
     if examiner_report_bytes:
         er_doc = fitz.open(stream=examiner_report_bytes, filetype="pdf")
         er_text = "\n\n".join([er_doc[i].get_text() for i in range(len(er_doc))])
-        for tag in await ai_pipeline.scan_text_for_misconceptions(er_text, "examiner report", known_topics or []):
+        for tag in await ai_pipeline.scan_text_for_misconceptions(er_text, "examiner report", known_topics or [], existing_tags=scan_context):
             proposed_by_tag[tag["tag_id"]] = tag
+            scan_context.append(tag)
     pipeline_results["proposed_misconceptions"] = list(proposed_by_tag.values())
 
     pipeline_results["token_usage"] = ai_pipeline.get_token_usage()
