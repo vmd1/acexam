@@ -13,7 +13,8 @@ async def run_full_ai_ingestion_pipeline(
     examiner_report_bytes: bytes | None = None,
     exam_board: str = "AQA",
     subject: str = "Biology",
-    known_topics: List[Dict[str, str]] | None = None
+    known_topics: List[Dict[str, str]] | None = None,
+    known_misconceptions: List[Dict[str, str]] | None = None
 ) -> Dict[str, Any]:
     """
     Coordinates the complete multi-modal AI Ingestion Pipeline (§3.1, §3.1a, §6.2, §6.2a):
@@ -163,7 +164,8 @@ async def run_full_ai_ingestion_pipeline(
                 question_text=q["text"],
                 mark_value=mark_val,
                 mark_scheme=question_mark_scheme or "Award marks for correct scientific reasoning.",
-                spec_code=(q.get("topic_spec_code") if using_ai_split else None) or ""
+                spec_code=(q.get("topic_spec_code") if using_ai_split else None) or "",
+                known_misconceptions=known_misconceptions or []
             )
             # Tag each example with its own question's number so the caller
             # can resolve it to a question_id once questions are inserted

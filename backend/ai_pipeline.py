@@ -835,17 +835,82 @@ async def scan_text_for_misconceptions(source_text: str, source_label: str, know
 
     return [t for t in tags if isinstance(t, dict) and t.get("spec_code") in known_codes]
 
+async def blind_grade_synthetic_answer(
+    question_text: str,
+    mark_value: int,
+    mark_scheme: str,
+    candidate_answer: str,
+    known_misconceptions: List[Dict[str, str]] | None = None
+) -> Dict[str, Any]:
+    """
+    §6.2 Independent auto-grading: a *separate* hosted-API call from the one
+    that generated the candidate answer, blind to the mark level that
+    generation call was targeting (it never sees "target_marks" - only the
+    question, mark scheme, and answer text), so its output is a genuine
+    cross-check rather than the generator grading its own homework. Mirrors
+    the exact output shape §6.5 wants for a training example (marks_awarded,
+    feedback_text, missed_points, misconception_tags), so an accepted
+    example is already in the right shape for JSONL assembly later.
+
+    misconception_tags are constrained to the approved taxonomy passed in
+    (empty list if a spec code has no approved tags yet) rather than letting
+    the model invent free-text tags - per §6.2a, an unconstrained tag can't
+    be matched reliably across attempts.
+    """
+    tags_list = "\n".join(f"- {t['tag_id']}: {t['label']}" for t in known_misconceptions) if known_misconceptions else "(none approved yet)"
+    known_ids = {t["tag_id"] for t in known_misconceptions} if known_misconceptions else set()
+    prompt = f"""
+    Mark this GCSE exam answer exactly as a human examiner would, strictly against the
+    mark scheme below. Award only the marks the mark scheme's criteria actually support -
+    do not guess and do not be generous.
+
+    Question: {question_text}
+    Mark scheme ({mark_value} marks available): {mark_scheme}
+    Student answer: "{candidate_answer}"
+
+    If the answer reveals a conceptual misconception, choose the single best-matching tag
+    from this approved list (omit misconception_tags entirely if none clearly fit - never
+    invent a tag not on this list):
+    {tags_list}
+
+    Output ONLY a flat JSON object with exactly this shape (field names must match exactly):
+    {{"marks_awarded": <integer 0 to {mark_value}>, "feedback_text": "<brief examiner-style feedback>",
+      "missed_points": ["<mark scheme point not evidenced in the answer>", ...],
+      "misconception_tags": ["<tag_id from the approved list>", ...]}}
+    """
+    res = await call_llm(prompt, temperature=0.1)
+    try:
+        data = json.loads(res)
+        try:
+            marks = int(data.get("marks_awarded", 0))
+        except (TypeError, ValueError):
+            marks = 0
+        marks = max(0, min(marks, mark_value))
+        missed = [str(m) for m in data.get("missed_points", [])] if isinstance(data.get("missed_points"), list) else []
+        tags = [t for t in data.get("misconception_tags", []) if isinstance(t, str) and t in known_ids] if isinstance(data.get("misconception_tags"), list) else []
+        return {
+            "marks_awarded": marks,
+            "feedback_text": str(data.get("feedback_text", "") or ""),
+            "missed_points": missed,
+            "misconception_tags": tags,
+        }
+    except Exception as e:
+        print(f"Independent auto-grading error: {e}")
+        return {"marks_awarded": 0, "feedback_text": "", "missed_points": [], "misconception_tags": []}
+
 async def generate_and_validate_synthetic_answers(
     question_text: str,
     mark_value: int,
     mark_scheme: str,
-    spec_code: str
+    spec_code: str,
+    known_misconceptions: List[Dict[str, str]] | None = None
 ) -> List[Dict[str, Any]]:
     """
     §6.2 Synthetic Training Data Generation & Auto-Grading Cross-Check:
     1. Generates candidate synthetic answers targeting specific marks.
-    2. Runs blind independent auto-grading.
-    3. Cross-checks: if target_marks == awarded_marks, accepted = True.
+    2. Runs blind_grade_synthetic_answer as a genuinely independent second
+       call per candidate (never told the target level).
+    3. Cross-checks: accepted if target and awarded agree within tolerance.
     """
     prompt = f"""
     Generate 3 distinct synthetic student answers for:
@@ -868,7 +933,7 @@ async def generate_and_validate_synthetic_answers(
     """
     res = await call_llm(prompt, temperature=0.4)
     accepted_examples = []
-    
+
     try:
         data = json.loads(res)
         candidates = _extract_list(data, "synthetic_answers")
@@ -876,22 +941,21 @@ async def generate_and_validate_synthetic_answers(
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
-            # Independent blind auto-grading check
             try:
                 target = int(cand.get("target_marks", 0))
             except (TypeError, ValueError):
                 target = 0
             ans = str(cand.get("answer", ""))
-            
-            # Simple keyword overlap validation
-            points = [p.strip() for p in mark_scheme.split("\n") if p.strip()]
-            score = 0
-            for p in points:
-                kws = [w for w in re.findall(r'\b[a-zA-Z]{4,}\b', p.lower()) if w not in {'allow', 'accept', 'marks'}]
-                if kws and any(kw in ans.lower() for kw in kws[:2]):
-                    score += 1
-            awarded = min(score, mark_value)
-            
+
+            grade = await blind_grade_synthetic_answer(
+                question_text=question_text,
+                mark_value=mark_value,
+                mark_scheme=mark_scheme,
+                candidate_answer=ans,
+                known_misconceptions=known_misconceptions
+            )
+            awarded = grade["marks_awarded"]
+
             # Cross-check agreement
             is_valid = (awarded == target) or (abs(awarded - target) <= 1)
             accepted_examples.append({
@@ -899,9 +963,12 @@ async def generate_and_validate_synthetic_answers(
                 "awarded_marks": awarded,
                 "student_answer": ans,
                 "is_accepted_for_training": is_valid,
-                "spec_code": spec_code
+                "spec_code": spec_code,
+                "feedback_text": grade["feedback_text"],
+                "missed_points": grade["missed_points"],
+                "misconception_tags": grade["misconception_tags"],
             })
     except Exception as e:
         print(f"Synthetic generation error: {e}")
-        
+
     return accepted_examples

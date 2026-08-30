@@ -75,6 +75,21 @@ async def upload_paper(
         )
     known_topics = [{"spec_code": r["spec_code"], "title": r["title"]} for r in known_topic_rows]
 
+    # Approved misconception tags in scope for this qualification (§6.2a) -
+    # the independent grader (§6.2) may only choose from these, never invent
+    # its own phrasing. A brand-new spec code with nothing approved yet just
+    # gets an empty list, which is fine - it means no misconception_tags get
+    # attached to this batch's training examples, not that grading fails.
+    known_codes = [t["spec_code"] for t in known_topics]
+    known_misconceptions = []
+    if known_codes:
+        async with db.acquire() as conn:
+            misconception_rows = await conn.fetch(
+                'SELECT tag_id, label FROM misconception_taxonomy WHERE spec_code = ANY($1) AND approved_at IS NOT NULL',
+                known_codes
+            )
+        known_misconceptions = [{"tag_id": r["tag_id"], "label": r["label"]} for r in misconception_rows]
+
     try:
         results = await ingestion.run_full_ai_ingestion_pipeline(
             question_paper_bytes=qp_bytes,
@@ -82,7 +97,8 @@ async def upload_paper(
             examiner_report_bytes=er_bytes,
             exam_board=exam_board,
             subject=subject,
-            known_topics=known_topics
+            known_topics=known_topics,
+            known_misconceptions=known_misconceptions
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Ingestion Pipeline failed: {str(e)}")
@@ -153,13 +169,17 @@ async def upload_paper(
             await conn.execute('''
                 INSERT INTO training_examples (
                     question_id, spec_code, candidate_answer, target_marks,
-                    awarded_marks, is_accepted_for_training
+                    awarded_marks, is_accepted_for_training, feedback_text,
+                    missed_points, misconception_tags
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ''',
                 question_id, te.get("spec_code") or None, te.get("student_answer", ""),
                 te.get("target_marks", 0), te.get("awarded_marks", 0),
-                bool(te.get("is_accepted_for_training", False))
+                bool(te.get("is_accepted_for_training", False)),
+                te.get("feedback_text") or None,
+                json.dumps(te.get("missed_points", [])),
+                json.dumps(te.get("misconception_tags", []))
             )
 
     return {
