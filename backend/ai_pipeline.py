@@ -588,6 +588,20 @@ def _clean_answer_type_and_options(raw_type: Any, raw_options: Any) -> Tuple[str
 
     return "written", None
 
+# Targets stray numbered-answer-line placeholders that leak from the original
+# PDF layout into `question_text` (e.g. a "state two reasons" question with
+# two blank ruled answer lines numbered "1" and "2" on the paper gets its
+# text extracted with a trailing literal "1 2"). Matches a trailing run of
+# 2+ whitespace-separated single digits with nothing else after them.
+# Deliberately requires 2+ digits (not 1) - a single trailing digit is too
+# common as genuine content (a calculation result, a coordinate, a page/step
+# reference) to safely strip, but two-or-more bare single digits in a row
+# right at the end of the text, with no other trailing content, is very
+# unlikely to occur as legitimate question wording and reliably matches the
+# "1 2" / "1 2 3" answer-line-numbering pattern instead.
+_TRAILING_ANSWER_LINE_NUMBERS_RE = re.compile(r'(?:\s+\d){2,}\s*$')
+
+
 async def split_paper_into_questions(
     page_texts: List[str],
     mark_scheme_text: str,
@@ -710,6 +724,10 @@ async def split_paper_into_questions(
           only if the row statements are present in the text (not solely inside an image/table you cannot read)
     {topics_block}
     Ignore administrative/boilerplate text: "Do not write outside the box", print/version codes, blank answer lines, page numbers.
+    In particular, a trailing bare sequence of small numbers with no other content (e.g. a lone "1", or "1 2",
+    or "1 2 3" at the very end of the question text) is usually the numbering printed next to blank ruled answer
+    lines on the original paper (e.g. a "state two reasons" question with two ruled lines numbered "1" and "2"),
+    not real question content - drop it, don't append it to question_text.
 
     Output ONLY a flat JSON object: {{"questions": [{{"question_number": "...", "stem_text": "...", "question_text": "...", "mark_value": N, "page": N, "mark_scheme_text": "...", "references_figure": true, "figure_label": "Figure 9", "topic_spec_codes": ["..."], "answer_type": "written", "answer_options": null}}, ...]}}
 
@@ -770,9 +788,15 @@ async def split_paper_into_questions(
                 answer_type, answer_options = _clean_answer_type_and_options(
                     q.get("answer_type"), q.get("answer_options")
                 )
+                # Deterministic backstop: strip a trailing run of bare
+                # numbered-answer-line placeholders (e.g. "... in your
+                # answer 1 2") that the AI split sometimes leaves in despite
+                # the prompt instruction above, since a single LLM
+                # instruction isn't reliable enough on its own for this.
+                question_text = _TRAILING_ANSWER_LINE_NUMBERS_RE.sub('', str(text))
                 cleaned.append({
                     "number": str(number).strip(),
-                    "text": str(text).strip(),
+                    "text": question_text.strip(),
                     "stem_text": stem_text,
                     "mark_value": mark_val,
                     "page": page,
