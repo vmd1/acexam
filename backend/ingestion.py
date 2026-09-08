@@ -391,14 +391,55 @@ async def run_full_ai_ingestion_pipeline(
             q_tables = [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
         elif using_ai_split and root in group_page_span:
             # This sub-question DOES reference a figure/table of its own,
-            # but not one we could confidently pick out individually (no
-            # named label, or more images/tables in range than distinct
-            # labels to match them against) - fall back to everything in the
-            # group's page range rather than guessing a wrong pairing, same
-            # as before. Only reached for a question that actually asked for
-            # something, unlike the old group-wide gate.
+            # but not one we could confidently pick out individually via the
+            # group_label_to_image pre-pass (no named label, or the group's
+            # distinct-label count didn't exactly match its image count -
+            # e.g. two genuinely different diagrams both mislabelled
+            # "Figure 9" by the AI splitter/source PDF, which is exactly the
+            # count mismatch that pre-pass refuses to guess through).
+            #
+            # The OLD behavior here attached every image anywhere in the
+            # group's page range to every sub-question that referenced any
+            # figure at all - confirmed to reproduce the reported bug
+            # exactly: two distinct "Figure 9" images both landing on both
+            # of the two sub-questions that each only needed one of them,
+            # while a third sibling needing a different diagram effectively
+            # never got a chance to be distinguished from the other two.
+            #
+            # Narrow this per-question instead of per-group: prefer the
+            # image(s) that actually sit on THIS sub-question's own page. A
+            # single same-page match is about as strong a signal as we have
+            # without real per-image labels (image_extractor.py extracts
+            # "page"/"bbox"/"checksum" per image but never an OCR'd
+            # caption), since real papers place a diagram immediately next
+            # to (or on) the sub-question that discusses it. Multiple
+            # same-page candidates are still genuinely ambiguous - guessing
+            # between them is exactly the wrong-image-is-worse-than-no-image
+            # case the issue calls out, so that yields nothing rather than a
+            # coin flip.
             lo, hi = group_page_span[root]
-            q_images = [img for img in extracted_images if lo <= img.get("page", 0) <= hi]
+            candidates = [img for img in extracted_images if lo <= img.get("page", 0) <= hi]
+            if len(candidates) <= 1:
+                # 0 or 1 candidate in the whole group range is unambiguous
+                # by construction - this is also how a single diagram shared
+                # by every sibling under one stem still reaches every one of
+                # them, unchanged from before.
+                q_images = candidates
+            else:
+                same_page = [img for img in candidates if q_page is not None and img.get("page") == q_page]
+                if len(same_page) == 1:
+                    q_images = same_page
+                elif len(same_page) > 1:
+                    q_images = []
+                elif q_page is not None:
+                    # Nothing on this exact page - fall back to the single
+                    # nearest candidate by page distance, but only if it
+                    # isn't tied with another equally-near candidate.
+                    nearest_dist = min(abs(img.get("page", 0) - q_page) for img in candidates)
+                    nearest = [img for img in candidates if abs(img.get("page", 0) - q_page) == nearest_dist]
+                    q_images = nearest if len(nearest) == 1 else []
+                else:
+                    q_images = []
             q_tables = [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
         elif not using_ai_split and q.get("references_figure", True):
             q_images = extracted_images[:1] if extracted_images else []
