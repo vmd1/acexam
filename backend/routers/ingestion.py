@@ -20,6 +20,78 @@ router = APIRouter(dependencies=[Depends(rate_limit), Depends(get_current_admin_
 # endpoints are already admin-only). See vmd1/acexam#19.
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 
+# Deterministic backstop for ai_pipeline.extract_spec_topics_from_text: even with the
+# prompt's front-matter exclusion instructions, the model occasionally still returns an
+# administrative section (how the qualification is administered/assessed/entered) as if it
+# were real syllabus content. These are the actual titles observed polluting spec_topics
+# from a live AQA GCSE Biology spec ingestion (vmd1/acexam#8) - matched case-insensitively
+# as a substring of the extracted title, not a hypothetical list.
+_NON_SYLLABUS_TITLE_PATTERNS = [
+    "aims and learning outcomes",
+    "assessment objectives",
+    "assessment weightings",
+    "entries and codes",
+    "overlaps with other qualifications",
+    "awarding grades and reporting results",
+    "previous learning and prerequisites",
+    "access to assessment",
+    "working with aqa for the first time",
+    "private candidates",
+]
+
+def _is_non_syllabus_title(title: str) -> bool:
+    lowered = (title or "").strip().lower()
+    return any(pattern in lowered for pattern in _NON_SYLLABUS_TITLE_PATTERNS)
+
+def _filter_non_syllabus_topics(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Drops administrative/front-matter topics that slipped past the extraction prompt, as a
+    deterministic backstop before topics are inserted into spec_topics (see
+    _NON_SYLLABUS_TITLE_PATTERNS). Must run BEFORE the two-pass parent_id resolution insert
+    in upload_specification, not after - filtering post-insert could leave dangling
+    parent_id references to a deleted row.
+
+    A topic whose title itself doesn't match the denylist but whose parent (at any depth)
+    was dropped is also dropped, on the assumption that a sub-section of a mis-titled
+    administrative section is itself administrative (e.g. a numbered sub-bullet under
+    "Access to assessment: diversity and inclusion"). This is a judgment call - if it's
+    wrong for a given spec, a warning is logged per dropped child so an admin reviewing
+    ingestion output can catch and manually re-add it.
+    """
+    by_code = {t["spec_code"]: t for t in topics}
+    dropped_codes = {t["spec_code"] for t in topics if _is_non_syllabus_title(t["title"])}
+
+    # Cascade to descendants of a dropped topic (fixpoint - specs can nest sub-sections
+    # several levels deep, e.g. 0.1 -> 0.1.1 -> 0.1.1.1).
+    changed = True
+    while changed:
+        changed = False
+        for t in topics:
+            code = t["spec_code"]
+            parent = t.get("parent_spec_code")
+            if code not in dropped_codes and parent in dropped_codes:
+                dropped_codes.add(code)
+                changed = True
+
+    kept = []
+    for t in topics:
+        code = t["spec_code"]
+        if code in dropped_codes:
+            if not _is_non_syllabus_title(t["title"]):
+                # Dropped only because a parent was dropped, not because its own title
+                # matched the denylist - flag it rather than silently discarding, since it
+                # might be real content mis-nested under an administrative heading.
+                parent = t.get("parent_spec_code")
+                parent_title = by_code.get(parent, {}).get("title", parent)
+                print(
+                    f"upload-spec: dropping topic {code!r} ({t['title']!r}) because its "
+                    f"parent {parent!r} ({parent_title!r}) matched the non-syllabus "
+                    "denylist - review manually if this looks like real content"
+                )
+            continue
+        kept.append(t)
+    return kept
+
 class UpdateQuestionRequest(BaseModel):
     question_number: Optional[str] = None
     mark_value: Optional[int] = None
@@ -294,6 +366,10 @@ async def upload_specification(
     tiers = result["tiers"]
     target_marks = result.get("target_marks")
     time_limit_minutes = result.get("time_limit_minutes")
+    if not topics:
+        raise HTTPException(status_code=422, detail="Could not extract any topics from this specification document")
+
+    topics = _filter_non_syllabus_topics(topics)
     if not topics:
         raise HTTPException(status_code=422, detail="Could not extract any topics from this specification document")
 
