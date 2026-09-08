@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from database import get_db
 from dependencies import rate_limit, get_current_user_id
@@ -42,7 +44,7 @@ async def get_paper(paper_id: str, db=Depends(get_db)):
         }
 
 @router.get("/question/{question_id}")
-async def get_question(question_id: str, db=Depends(get_db)):
+async def get_question(question_id: uuid.UUID, db=Depends(get_db)):
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
     async with db.acquire() as conn:
