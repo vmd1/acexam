@@ -1,0 +1,14 @@
+-- Phase 26: persist references_figure on questions.
+--
+-- The AI question-splitter (ai_pipeline.py::split_paper_into_questions)
+-- already classifies each sub-question with a references_figure flag (true
+-- if the question text mentions/depends on a diagram, image, graph, table,
+-- or figure - see ingestion.py's own_references_figure), but that flag was
+-- only ever used transiently during ingestion to decide image linking and
+-- was never stored on the row. That made it impossible to tell, after the
+-- fact, whether a question with an empty images array is (a) fine - it
+-- never referenced a figure - or (b) unanswerable - it references a figure
+-- that was never successfully extracted/linked (e.g. the source PDF states
+-- the image "cannot be reproduced here due to third-party copyright
+-- restrictions"). See GitHub issue vmd1/acexam#4.
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS references_figure BOOLEAN NOT NULL DEFAULT false;

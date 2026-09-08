@@ -176,9 +176,10 @@ async def upload_paper(
                 INSERT INTO questions (
                     paper_id, question_number, mark_value, question_text,
                     images, marking_type, marking_dsl, mark_scheme_text,
-                    needs_review, spec_topic_id, answer_type, answer_options, table_data
+                    needs_review, spec_topic_id, answer_type, answer_options, table_data,
+                    references_figure
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 RETURNING id
             ''',
                 paper_id, q["question_number"], q["mark_value"], q["question_text"],
@@ -186,7 +187,8 @@ async def upload_paper(
                 q.get("mark_scheme_text"), q.get("needs_review", False), primary_topic_id,
                 q.get("answer_type", "written"),
                 json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None,
-                json.dumps(q["table_data"]) if q.get("table_data") is not None else None
+                json.dumps(q["table_data"]) if q.get("table_data") is not None else None,
+                bool(q.get("references_figure", False))
             )
             question_id_by_number[q["question_number"]] = question_id
             if topic_ids:
