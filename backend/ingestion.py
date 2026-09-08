@@ -378,6 +378,30 @@ async def run_full_ai_ingestion_pipeline(
         own_label_norm = _normalize_figure_label(figure_label) if using_ai_split else None
         label_map = group_label_to_image.get(root) if using_ai_split else None
 
+        # Tables have no equivalent of images' figure_label/checksum
+        # disambiguation - pdfplumber's extract_tables() (step 4 above) only
+        # ever hands back cell text plus the single page it was found on, no
+        # caption/label text to match against a sub-question's own wording.
+        # But each AI-split sub-question DOES carry its own "page" (q_page,
+        # captured above) - the page its own question_text was actually
+        # extracted from, which is a much tighter scope than the whole
+        # sibling group's [lo, hi] page span. A real multi-table group (e.g.
+        # an obesity/sugar-intake table, an iodine-colour table, a protease-
+        # pH table across sub-questions 5.1-5.7) prints each table on/near
+        # the page of the specific sub-question that actually uses it, so
+        # matching on q_page alone is enough to stop unrelated tables
+        # elsewhere in the group from being attached. Only widen to the
+        # group-wide range (the old, coarser behavior) when nothing was
+        # found on this exact page - a table can still be printed a page
+        # before/after the sub-question that references it (e.g. a shared
+        # stem table printed once above several sub-questions spanning more
+        # than one page) - so the group-wide range stays as the rare
+        # fallback, not the default.
+        q_page_tables = (
+            [t["rows"] for t in pipeline_results["tables"] if t.get("page") == q_page]
+            if using_ai_split and q_page is not None else []
+        )
+
         if using_ai_split and not own_references_figure:
             q_images = []
             q_tables = []
@@ -387,8 +411,11 @@ async def run_full_ai_ingestion_pipeline(
             # could be confidently paired against, so it gets ONLY that one
             # image, not every image anywhere in the group's page range.
             q_images = [label_map[own_label_norm]]
-            lo, hi = group_page_span[root]
-            q_tables = [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
+            if q_page_tables:
+                q_tables = q_page_tables
+            else:
+                lo, hi = group_page_span[root]
+                q_tables = [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
         elif using_ai_split and root in group_page_span:
             # This sub-question DOES reference a figure/table of its own,
             # but not one we could confidently pick out individually via the
@@ -440,7 +467,10 @@ async def run_full_ai_ingestion_pipeline(
                     q_images = nearest if len(nearest) == 1 else []
                 else:
                     q_images = []
-            q_tables = [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
+            # Tables: prefer this sub-question's own page (q_page_tables,
+            # see above) over the whole group's range - the group-wide
+            # range is now the rare last-resort fallback, not the default.
+            q_tables = q_page_tables if q_page_tables else [t["rows"] for t in pipeline_results["tables"] if lo <= t.get("page", 0) <= hi]
         elif not using_ai_split and q.get("references_figure", True):
             q_images = extracted_images[:1] if extracted_images else []
             q_tables = [t["rows"] for t in pipeline_results["tables"]][:1] if pipeline_results["tables"] else []
