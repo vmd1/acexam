@@ -858,7 +858,16 @@ async def extract_spec_topics_from_text(spec_text: str) -> Dict[str, Any]:
       section is common to all tiers (the default - most content is), or the qualification
       isn't tiered at all, output null.
 
-    Ignore front matter (contents pages, assessment objectives, grade boundaries) and appendices.
+    Ignore front matter, administrative sections and appendices - these describe how the
+    qualification is administered, assessed or entered, not what students are taught and
+    examined on, and must NOT be output as topics. This includes (but is not limited to)
+    sections such as: contents pages; aims and learning outcomes; assessment objectives;
+    assessment weightings; scheme of assessment / grade boundaries; entries and codes;
+    overlaps with other qualifications; grading, awarding and reporting results; previous
+    learning and prerequisites; access to assessment / diversity and inclusion arrangements;
+    "working with [the exam board] for the first time" or other getting-started guidance for
+    centres; private candidates; and appendices. Only extract sections from the specification's
+    actual "Subject content" (the material students are taught and examined on).
 
     Also determine whether this qualification is tiered - i.e. whether the specification
     states it is assessed via separate tiers such as "Higher" and "Foundation" (common for
