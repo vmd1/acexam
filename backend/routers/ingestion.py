@@ -13,6 +13,13 @@ import hashlib
 
 router = APIRouter(dependencies=[Depends(rate_limit), Depends(get_current_admin_id)])
 
+# Real past-paper/spec/mark-scheme/examiner-report PDFs (AQA/Edexcel/OCR)
+# don't come close to this in practice - 50MB is generous headroom for even
+# a scan-heavy paper while still bounding the memory, PDF-parsing CPU, and
+# LLM-cost blast radius of a single upload (defense-in-depth: these
+# endpoints are already admin-only). See vmd1/acexam#19.
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
+
 class UpdateQuestionRequest(BaseModel):
     question_number: Optional[str] = None
     mark_value: Optional[int] = None
@@ -59,8 +66,14 @@ async def upload_paper(
         raise HTTPException(status_code=400, detail="Question paper must be a PDF file")
 
     qp_bytes = await file.read()
+    if len(qp_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
     ms_bytes = (await mark_scheme_file.read()) if mark_scheme_file else None
+    if ms_bytes is not None and len(ms_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
     er_bytes = (await examiner_report_file.read()) if examiner_report_file else None
+    if er_bytes is not None and len(er_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
 
     # Read the paper's own code and series/session off its cover page,
     # rather than an admin-facing form field - a real exam paper states
@@ -271,6 +284,8 @@ async def upload_specification(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     spec_bytes = await file.read()
+    if len(spec_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
     doc = fitz.open(stream=spec_bytes, filetype="pdf")
     spec_text = "\n\n".join(doc[i].get_text() for i in range(len(doc)))
 
