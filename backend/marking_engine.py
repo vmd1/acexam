@@ -248,7 +248,7 @@ def _mcq_partial_credit(
     correct = len(val_tokens & ans_tokens)
     marks_awarded = min(correct, mark_value)
     if marks_awarded == mark_value:
-        return marks_awarded, "Correct! Full marks awarded.", []
+        return marks_awarded, "Correct - well done, full marks awarded.", []
     missed = f"Correct: {correct}/{len(val_tokens)} correct option(s) selected. Expected option(s) {val}."
     return marks_awarded, missed, [missed]
 
@@ -338,7 +338,7 @@ def evaluate_dsl_expression(
 
     marks_awarded, reasons = _eval(_parse_dsl(dsl))
     if marks_awarded >= mark_value:
-        feedback = "Correct! Full marks awarded."
+        feedback = "Correct - well done, full marks awarded."
     elif marks_awarded > 0:
         feedback = f"Partial credit: {marks_awarded}/{mark_value} marks awarded. " + (" ".join(reasons) if reasons else "")
     else:
