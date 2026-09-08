@@ -93,6 +93,23 @@ NOT_ATTEMPTED_SQL = '''NOT EXISTS (
     WHERE a.question_id = q.id AND a.user_id = $1
 )'''
 
+# A question that references a figure/table (q.references_figure, set at
+# ingestion time from the AI splitter's per-sub-question classification -
+# see ingestion.py's own_references_figure) but never got an image
+# successfully linked to it is unanswerable as displayed - e.g. the source
+# PDF states the image "cannot be reproduced here due to third-party
+# copyright restrictions", so no image was ever extracted (GitHub issue
+# vmd1/acexam#4: "Name part Y in Figure 3" with no way to see the figure).
+# Excluded at initial candidate-selection time, the same point
+# MASTERY_EXCLUSION_SQL runs, NOT as a paper-level needs_review flag - that
+# would block the whole paper over one unanswerable sub-question. This does
+# NOT apply to exams.py's plain paper-browsing endpoints, which should still
+# show a paper's every question (including unanswerable ones) to an
+# admin/reviewer.
+UNANSWERABLE_FIGURE_EXCLUSION_SQL = '''NOT (
+    q.references_figure AND (q.images IS NULL OR q.images = '[]'::jsonb OR jsonb_array_length(q.images) = 0)
+)'''
+
 
 async def _drop_groups_with_attempted_siblings(conn, user_id, rows):
     """_expand_to_full_groups can pull an already-attempted sibling back
@@ -329,7 +346,7 @@ async def _select_adaptive_candidates(
         AND us.subject = p.subject AND us.level = p.level'''
     TIER_FILTER_SQL = '(st.tier_only IS NULL OR st.tier_only = us.tier)'
 
-    base_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, TIER_FILTER_SQL]
+    base_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, UNANSWERABLE_FIGURE_EXCLUSION_SQL, TIER_FILTER_SQL]
     params = [user_id]
 
     if subject:
@@ -376,7 +393,7 @@ async def _select_adaptive_candidates(
     # If not enough questions matched, backfill from the general (still
     # subject/exclude-filtered, but un-topic-targeted) pool.
     if len(questions) < 5:
-        fallback_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, TIER_FILTER_SQL]
+        fallback_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, UNANSWERABLE_FIGURE_EXCLUSION_SQL, TIER_FILTER_SQL]
         fallback_params = [user_id]
         if subject:
             fallback_params.append(subject)
@@ -610,7 +627,10 @@ async def generate_custom_paper(
         target_marks = (qualification['custom_paper_target_marks'] if qualification else None) or DEFAULT_CUSTOM_PAPER_TARGET_MARKS
         configured_time_limit_minutes = qualification['custom_paper_time_limit_minutes'] if qualification else None
 
-        conditions = [NOT_ATTEMPTED_SQL, "p.status = 'published'", "p.subject = $2", "p.level = $3"]
+        conditions = [
+            NOT_ATTEMPTED_SQL, UNANSWERABLE_FIGURE_EXCLUSION_SQL,
+            "p.status = 'published'", "p.subject = $2", "p.level = $3"
+        ]
         params = [user_id, req.subject, req.level]
 
         if req.exam_board:

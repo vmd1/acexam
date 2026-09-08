@@ -644,6 +644,15 @@ async def run_full_ai_ingestion_pipeline(
             "answer_type": answer_type,
             "answer_options": q.get("answer_options") if using_ai_split else None,
             "exemplar_eligible": exemplar_eligible,
+            # Persisted so candidate-selection queries (routers/generate.py)
+            # can exclude a question that references a figure/table but
+            # never got one successfully linked (own_references_figure
+            # above) - e.g. a source PDF that states the image "cannot be
+            # reproduced here due to third-party copyright restrictions".
+            # That combination makes the question unanswerable as displayed
+            # even though it was correctly gradeable as 0 marks. See GitHub
+            # issue vmd1/acexam#4.
+            "references_figure": own_references_figure,
         })
 
     # 7. Real exemplar answers from the examiner report (§6.2 seed data) -
