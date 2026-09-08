@@ -92,6 +92,10 @@ services:
       DATABASE_URL: postgresql://acexam:acexam@postgres:5432/acexam
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+      # Set to "true" in production (HTTPS deployments) so the access_token
+      # cookie is marked Secure. Left unset/false here since local dev is
+      # served over plain HTTP, where a Secure cookie would be dropped.
+      # COOKIE_SECURE: "true"
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@acexam.dev}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-AdminDev123!}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
