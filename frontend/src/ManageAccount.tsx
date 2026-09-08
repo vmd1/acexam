@@ -3,12 +3,12 @@ import { Link } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import api, { extractErrorMessage } from './api';
 import SubjectsManager from './SubjectsManager';
-import { AlertCircle, CheckCircle2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, LogOut } from 'lucide-react';
 
 const YEAR_GROUPS = ['Year 7', 'Year 8', 'Year 9', 'Year 10', 'Year 11', 'Year 12', 'Year 13'];
 
 export default function ManageAccount() {
-  const { user, login } = useAuth();
+  const { user, login, logout } = useAuth();
   const [displayName, setDisplayName] = useState(user?.display_name || '');
   // Default to "not set" rather than silently pre-selecting the first
   // option (Year 7) - that always displayed as a real value even when the
@@ -171,6 +171,21 @@ export default function ManageAccount() {
             Update password
           </button>
         </form>
+      </div>
+
+      <div className="card" style={{ marginTop: '2rem' }}>
+        <h3>Log out</h3>
+        <p style={{ marginTop: '0.5rem' }}>Sign out of Acexam on this device.</p>
+        <button
+          type="button"
+          onClick={logout}
+          className="btn btn-outline"
+          style={{ marginTop: '1rem' }}
+          aria-label="Log out"
+        >
+          <LogOut size={16} aria-hidden="true" />
+          <span>Log out</span>
+        </button>
       </div>
 
       <div className="sidebar-legal-links" style={{ marginTop: '2rem' }}>
