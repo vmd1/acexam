@@ -3,10 +3,18 @@ from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 import bcrypt
 import json
+import os
 from database import get_db
 from dependencies import create_access_token, get_current_user_id, rate_limit
 
 router = APIRouter()
+
+# Cookies must carry Secure in a real deployment (HTTPS), but local dev
+# (docker-compose.yml) serves the app over plain HTTP at *.acexam.localhost
+# via Traefik, where a Secure cookie would silently be dropped by the browser.
+# Default to false so existing dev setups keep working; set COOKIE_SECURE=true
+# in production environments.
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -94,13 +102,14 @@ async def login(req: LoginRequest, response: Response, db=Depends(get_db)):
         value=access_token,
         httponly=True,
         max_age=60*24*7*60,
-        samesite="lax"
+        samesite="lax",
+        secure=COOKIE_SECURE
     )
     return {"message": "Login successful"}
 
 @router.post("/logout")
 async def logout(response: Response):
-    response.delete_cookie(key="access_token")
+    response.delete_cookie(key="access_token", httponly=True, samesite="lax", secure=COOKIE_SECURE)
     return {"message": "Logout successful"}
 
 @router.get("/google")
