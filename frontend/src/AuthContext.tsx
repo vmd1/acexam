@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import api from './api';
 
 interface User {
@@ -26,23 +26,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [hasSubjects, setHasSubjects] = useState<boolean | null>(null);
 
-  const refreshSubjects = async () => {
-    try {
-      const res = await api.get('/auth/me/subjects');
-      setHasSubjects(res.data.length > 0);
-    } catch (error) {
-      setHasSubjects(null);
+  // Track in-flight requests so genuinely concurrent callers (e.g. StrictMode's
+  // double-invoked mount effect, or login() racing the mount effect) share one
+  // network call instead of firing duplicates. The ref is cleared as soon as the
+  // request settles, so any call that happens *after* a previous one has already
+  // resolved starts a brand-new fetch rather than reusing stale data.
+  const meRequestRef = useRef<Promise<User | null> | null>(null);
+  const subjectsRequestRef = useRef<Promise<void> | null>(null);
+
+  const fetchMe = (): Promise<User | null> => {
+    if (meRequestRef.current) {
+      return meRequestRef.current;
     }
+    const request = api
+      .get('/auth/me')
+      .then((response) => {
+        setUser(response.data);
+        return response.data as User;
+      })
+      .catch(() => {
+        setUser(null);
+        return null;
+      })
+      .finally(() => {
+        meRequestRef.current = null;
+      });
+    meRequestRef.current = request;
+    return request;
+  };
+
+  const refreshSubjects = (): Promise<void> => {
+    if (subjectsRequestRef.current) {
+      return subjectsRequestRef.current;
+    }
+    const request = api
+      .get('/auth/me/subjects')
+      .then((res) => {
+        setHasSubjects(res.data.length > 0);
+      })
+      .catch(() => {
+        setHasSubjects(null);
+      })
+      .finally(() => {
+        subjectsRequestRef.current = null;
+      });
+    subjectsRequestRef.current = request;
+    return request;
   };
 
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const response = await api.get('/auth/me');
-        setUser(response.data);
-        await refreshSubjects();
-      } catch (error) {
-        setUser(null);
+        const me = await fetchMe();
+        if (me) {
+          await refreshSubjects();
+        }
       } finally {
         setLoading(false);
       }
