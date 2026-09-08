@@ -143,9 +143,19 @@ async def get_analytics_profile(
                 WHERE user_id = $1 AND subject = $2 AND exam_board = $3 AND level = $4
             ''', user_id, subject, exam_board, level)
             tier = (tier_row['tier'] if tier_row else None) or ''
+            # NULL-safe tier comparison: grade_boundaries.tier is NOT NULL
+            # DEFAULT '' (the untiered convention), but user_subjects.tier is
+            # a plain nullable TEXT column, so a naive `tier = $4` here would
+            # silently match zero rows the moment either side ends up NULL
+            # instead of '' (ordinary SQL equality never matches NULL,
+            # including NULL = ''). IS NOT DISTINCT FROM is Postgres's
+            # null-safe equality operator, so this stays correct regardless
+            # of which convention a given row (or the Python coercion above)
+            # actually used.
             boundaries = await conn.fetch('''
                 SELECT grade, min_pct FROM grade_boundaries
-                WHERE exam_board = $1 AND level = $2 AND subject = $3 AND tier = $4
+                WHERE exam_board = $1 AND level = $2 AND subject = $3
+                  AND tier IS NOT DISTINCT FROM $4
                 ORDER BY min_pct DESC
             ''', exam_board, level, subject, tier)
             for b in boundaries:
