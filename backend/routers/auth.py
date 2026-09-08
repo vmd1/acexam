@@ -4,7 +4,7 @@ from typing import Optional
 import bcrypt
 import json
 from database import get_db
-from dependencies import create_access_token, get_current_user_id
+from dependencies import create_access_token, get_current_user_id, rate_limit
 
 router = APIRouter()
 
@@ -43,7 +43,7 @@ class UpdateUserSubjectRequest(BaseModel):
     latest_test_grade: Optional[str] = None
     show_latest_test_grade: Optional[bool] = None
 
-@router.post("/register")
+@router.post("/register", dependencies=[Depends(lambda request: rate_limit(request, limit=10, window=60))])
 async def register(req: RegisterRequest, db=Depends(get_db)):
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -66,7 +66,7 @@ async def register(req: RegisterRequest, db=Depends(get_db)):
             raise HTTPException(status_code=400, detail="Email already registered")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(lambda request: rate_limit(request, limit=10, window=60))])
 async def login(req: LoginRequest, response: Response, db=Depends(get_db)):
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
