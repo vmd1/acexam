@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 import bcrypt
@@ -58,7 +58,16 @@ class UpdateUserSubjectRequest(BaseModel):
     latest_test_grade: Optional[str] = None
     show_latest_test_grade: Optional[bool] = None
 
-@router.post("/register", dependencies=[Depends(lambda request: rate_limit(request, limit=10, window=60))])
+async def _auth_rate_limit(request: Request):
+    # A plain `lambda request: rate_limit(...)` here has no type annotation,
+    # so FastAPI can't tell it should resolve `request` from the ASGI scope
+    # and instead treats it as a required query parameter - every call to
+    # /register or /login then 422s unless the caller passes ?request=...
+    # A properly annotated function (lambdas can't carry annotations) fixes
+    # the dependency resolution.
+    await rate_limit(request, limit=10, window=60)
+
+@router.post("/register", dependencies=[Depends(_auth_rate_limit)])
 async def register(req: RegisterRequest, db=Depends(get_db)):
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -81,7 +90,7 @@ async def register(req: RegisterRequest, db=Depends(get_db)):
             raise HTTPException(status_code=400, detail="Email already registered")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.post("/login", dependencies=[Depends(lambda request: rate_limit(request, limit=10, window=60))])
+@router.post("/login", dependencies=[Depends(_auth_rate_limit)])
 async def login(req: LoginRequest, response: Response, db=Depends(get_db)):
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
