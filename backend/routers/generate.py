@@ -173,6 +173,68 @@ def _trim_groups_to_target_marks(rows, target_marks):
     return result
 
 
+def _normalize_qnum_for_match(s):
+    # Loosely normalizes a question-number string for equality comparison,
+    # mirroring ai_pipeline.py's _normalize_question_number: strips
+    # whitespace, lowercases, and drops leading zeros within each numeric
+    # run, so "03.3" and "3.3" (or "3 . 3") are recognised as the same
+    # question despite exam boards not zero-padding consistently.
+    s = (s or '').strip().lower()
+    s = re.sub(r'\s+', '', s)
+    s = re.sub(r'(?<![0-9])0+(?=[0-9])', '', s)
+    return s
+
+
+# Matches an in-text cross-reference to another question by its ORIGINAL
+# (pre-renumbering) number, e.g. "Question 03.3", "question 3.2",
+# "Question 01". Deliberately requires the literal word "Question" (not a
+# bare number, and not the "Q3.2" abbreviation) to keep this narrow - a
+# bare number in running text is far too likely to be genuine exam content
+# (a quantity, a figure count, etc.) rather than a cross-reference, and
+# only rewriting the unambiguous "Question <number>" phrasing keeps the
+# false-positive risk low. Only covers the dot-decimal numbering style
+# (AQA's "03.3") confirmed by the reported leak - a bracketed-suffix style
+# like "3(b)(ii)" (see questions.question_number's own format, used for
+# root-grouping) isn't known to appear as an in-text cross-reference in
+# practice, and deliberately isn't matched here to avoid a boundary that's
+# ambiguous between "end of the reference" and "start of surrounding
+# punctuation".
+QUESTION_REF_RE = re.compile(
+    r'\bQuestion\s+(\d+(?:\.\d+)*)\b',
+    re.IGNORECASE
+)
+
+
+def _remap_question_refs(text, paper_id, ref_map):
+    """Rewrites in-text "Question <old number>" cross-references (e.g. "the
+    hormone you named in Question 03.3") to the new display number that
+    question got renumbered to in this custom paper (e.g. "Question 8.3").
+    Only rewrites a reference if it resolves to a real question from the
+    SAME source paper (ref_map is keyed per paper_id, since two different
+    source papers can each have their own "question 1" - a bare number
+    can't plausibly cross-reference a question from a different paper) and
+    only if that referenced question was actually included in THIS custom
+    paper's mapping. A reference to a question that exists in the source
+    paper but got filtered out of this custom paper (e.g. by the topic
+    filter) has no entry to resolve to - that's left untouched rather than
+    guess-rewritten, since a dangling cross-reference to a question the
+    student never sees is a separate, pre-existing problem this fix doesn't
+    attempt to solve, and silently mismatching it to some other question
+    would be worse than leaving the stale number in place."""
+    if not text or paper_id not in ref_map:
+        return text
+    paper_refs = ref_map[paper_id]
+
+    def _replace(m):
+        old_norm = _normalize_qnum_for_match(m.group(1))
+        new_number = paper_refs.get(old_norm)
+        if new_number is None:
+            return m.group(0)
+        return f"Question {new_number}"
+
+    return QUESTION_REF_RE.sub(_replace, text)
+
+
 def _renumber_for_custom_paper(rows):
     """A custom paper is stitched together from questions scattered across
     the bank, so their original question_numbers (e.g. "07.1", "03.2")
@@ -180,10 +242,22 @@ def _renumber_for_custom_paper(rows):
     sequentially from 1. Renumbers each group to its position in THIS
     paper while preserving each sub-question's own suffix (the ".2" /
     "(b)(ii)" part after the leading digits), so a multi-part stem still
-    reads as one connected question, just under its new position."""
+    reads as one connected question, just under its new position.
+
+    Also rewrites in-text cross-references within question_text that refer
+    to another question by its old number (e.g. "...the hormone you named
+    in Question 03.3...") so they point at the new number the referenced
+    question ended up with here, instead of leaking a stale original-paper
+    number that means nothing to the student. See _remap_question_refs for
+    the matching/fallback rules."""
     if not rows:
         return rows
     root_to_new = {}
+    # Per-paper old(normalized full number) -> new full number, built
+    # alongside the root renumbering below so the two can never disagree -
+    # this reuses the exact same key/assignment the metadata renumbering
+    # already computes rather than re-deriving a mapping separately.
+    ref_map = {}
     for r in rows:
         key = (r['paper_id'], _question_root(r['question_number']))
         if key not in root_to_new:
@@ -194,8 +268,18 @@ def _renumber_for_custom_paper(rows):
         d = dict(r)
         key = (r['paper_id'], _question_root(r['question_number']))
         suffix = ROOT_NUMBER_RE.sub('', d['question_number'] or '', count=1)
-        d['question_number'] = f"{root_to_new[key]}{suffix}"
+        new_number = f"{root_to_new[key]}{suffix}"
+        d['question_number'] = new_number
+        ref_map.setdefault(r['paper_id'], {})[
+            _normalize_qnum_for_match(r['question_number'])
+        ] = new_number
         renumbered.append(d)
+
+    for d in renumbered:
+        d['question_text'] = _remap_question_refs(
+            d.get('question_text'), d['paper_id'], ref_map
+        )
+
     return renumbered
 
 
