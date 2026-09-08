@@ -17,6 +17,9 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'GCSE';
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS tier TEXT;
 ALTER TABLE user_subjects ADD COLUMN IF NOT EXISTS tier TEXT;
 
-INSERT INTO qualifications (exam_board, level, subject, tiers)
-VALUES ('AQA', 'GCSE', 'Biology', '{Higher}')
-ON CONFLICT (exam_board, level, subject) DO UPDATE SET tiers = EXCLUDED.tiers;
+-- No placeholder qualification seed here on purpose: migrate.py re-runs
+-- every phase file's full contents on every migration, so an
+-- ON CONFLICT DO UPDATE seed row here would keep re-clobbering tiers back
+-- to this placeholder every time - stomping over the real tiers a spec
+-- upload (routers/ingestion.py::upload_specification) extracts from the
+-- actual specification document, which is the authoritative source.

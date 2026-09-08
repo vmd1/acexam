@@ -18,6 +18,20 @@ def _question_root(question_number: str) -> str:
     return match.group(1) if match else (question_number or '')
 
 
+_NATURAL_SORT_CHUNK_RE = re.compile(r'(\d+)')
+
+
+def _natural_sort_key(question_number: str):
+    # Mirrors the frontend's localeCompare(..., {numeric: true}) so a
+    # multi-part question's sub-parts ('1.2' before '1.10', not after) sort
+    # the same way server-side as they already render client-side - the
+    # canonical stored order (attempt_questions.position, the renumbering
+    # below) should match what students actually see, not rely on the
+    # frontend's own re-sort to paper over an unordered fetch.
+    parts = _NATURAL_SORT_CHUNK_RE.split(question_number or '')
+    return [int(p) if p.isdigit() else p for p in parts]
+
+
 async def _expand_to_full_groups(conn, rows, max_groups=None):
     """Given candidate question rows (possibly only some sub-parts of a
     multi-part question, since candidates are filtered per-row by topic),
@@ -52,7 +66,10 @@ async def _expand_to_full_groups(conn, rows, max_groups=None):
     ''', paper_ids, roots)
 
     order_index = {key: i for i, key in enumerate(seen_keys)}
-    return sorted(full_rows, key=lambda r: order_index[(r['paper_id'], _question_root(r['question_number']))])
+    return sorted(full_rows, key=lambda r: (
+        order_index[(r['paper_id'], _question_root(r['question_number']))],
+        _natural_sort_key(r['question_number'])
+    ))
 
 
 # A question the student has already scored full marks on is excluded from
@@ -176,7 +193,7 @@ async def _attach_previous_answers(conn, user_id, rows):
     prev_rows = await conn.fetch('''
         SELECT DISTINCT ON (question_id)
             question_id, answer_text, answer_image_url, marks_awarded, marks_possible,
-            feedback_text, missed_points, misconception_tags, marked_by, created_at
+            feedback_text, www, missed_points, misconception_tags, marked_by, created_at
         FROM answers
         WHERE user_id = $1 AND question_id = ANY($2)
         ORDER BY question_id, created_at DESC
@@ -195,6 +212,56 @@ async def _attach_previous_answers(conn, user_id, rows):
         result.append(d)
     return result
 
+async def _attach_answers_for_attempt(conn, attempt_id, rows):
+    """Like _attach_previous_answers, but scoped to one specific attempt_id
+    instead of "most recent answer anywhere" - used when reopening a saved
+    paper/session so it shows exactly what was submitted within THAT
+    attempt (and a later re-attempt inside the same attempt_id naturally
+    supersedes it, since we still take the most recent by created_at)."""
+    if not rows:
+        return []
+
+    question_ids = [r['id'] for r in rows]
+    prev_rows = await conn.fetch('''
+        SELECT DISTINCT ON (question_id)
+            question_id, answer_text, answer_image_url, marks_awarded, marks_possible,
+            feedback_text, www, missed_points, misconception_tags, marked_by, created_at
+        FROM answers
+        WHERE attempt_id = $1 AND question_id = ANY($2)
+        ORDER BY question_id, created_at DESC
+    ''', attempt_id, question_ids)
+    prev_by_qid = {r['question_id']: dict(r) for r in prev_rows}
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        prev = prev_by_qid.get(r['id'])
+        if prev:
+            prev = dict(prev)
+            prev.pop('question_id', None)
+            prev['created_at'] = prev['created_at'].isoformat() if prev.get('created_at') else None
+        d['previous_answer'] = prev
+        result.append(d)
+    return result
+
+
+def _parse_id_list(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    return [v for v in (part.strip() for part in raw.split(',')) if v]
+
+
+async def _record_attempt_questions(conn, attempt_id, question_ids, start_position=0):
+    if not question_ids:
+        return
+    rows = [(attempt_id, qid, start_position + i) for i, qid in enumerate(question_ids)]
+    await conn.executemany(
+        'INSERT INTO attempt_questions (attempt_id, question_id, position) VALUES ($1, $2, $3) '
+        'ON CONFLICT (attempt_id, question_id) DO NOTHING',
+        rows
+    )
+
+
 class CustomPaperRequest(BaseModel):
     subject: Optional[str] = "Biology"
     exam_board: Optional[str] = "AQA"
@@ -202,119 +269,313 @@ class CustomPaperRequest(BaseModel):
     spec_topic_ids: Optional[List[str]] = []
 
 # Used when this (exam_board, level, subject) has no admin-configured
-# custom_paper_target_marks yet (Manage Subjects, §qualifications).
-DEFAULT_CUSTOM_PAPER_TARGET_MARKS = 20
+# custom_paper_target_marks yet (Manage Subjects, §qualifications) - 100 is
+# the standard total for a GCSE paper (matches real exam length, and the
+# admin-configured values already in use for other qualifications).
+DEFAULT_CUSTOM_PAPER_TARGET_MARKS = 100
 # ~1 minute per mark is the standard GCSE exam-technique rule of thumb,
 # used only when there's no configured custom_paper_time_limit_minutes.
 DEFAULT_SECONDS_PER_MARK = 60
 MIN_CUSTOM_PAPER_TIME_LIMIT_SECONDS = 600
 
-@router.get("/adaptive-queue")
-async def get_adaptive_queue(
-    user_id: str = Depends(get_current_user_id),
-    db=Depends(get_db)
+async def _select_adaptive_candidates(
+    conn, user_id, subject, exam_board, level, topic_mode, topic_ids, exclude_ids, max_groups=6
 ):
-    if not db:
-        raise HTTPException(status_code=500, detail="Internal server error")
-        
-    async with db.acquire() as conn:
-        # 1. Update memory decay scores
-        await calculate_decayed_mastery_scores(conn, user_id)
-        
-        # 2. Check active misconceptions
-        active_misconceptions = await conn.fetch('''
-            SELECT spec_code, tag_id, occurrences
-            FROM student_misconceptions
-            WHERE user_id = $1 AND status = 'active'
-            ORDER BY occurrences DESC
-            LIMIT 3
-        ''', user_id)
-        
-        # 3. Check lowest mastery / decaying topics
-        weak_topics = await conn.fetch('''
-            SELECT spec_topic_id, decay_score, mastery_score
-            FROM student_topic_mastery
-            WHERE user_id = $1
-            ORDER BY decay_score ASC
-            LIMIT 3
-        ''', user_id)
-        
-        # 4. Check weakest command words
-        weak_commands = await conn.fetch('''
-            SELECT command_word,
-                   CASE WHEN marks_possible > 0 THEN (marks_awarded::float / marks_possible) ELSE 0.0 END as acc
-            FROM student_command_word_mastery
-            WHERE user_id = $1 AND marks_possible >= 3
-            ORDER BY acc ASC
-            LIMIT 2
-        ''', user_id)
-        
-        target_topic_ids = [str(r['spec_topic_id']) for r in weak_topics]
-        target_spec_codes = [r['spec_code'] for r in active_misconceptions]
-        
-        # Fetch matching questions or fallback to general bank. Questions the
-        # student has already scored full marks on are excluded so a
-        # mastered question is never served again. Also excludes questions
-        # under a Higher-tier-only topic when the student is Foundation tier
-        # for that subject (or their tier for it is unknown) -- specs merge
-        # both tiers into one document and flag some content as HT-only, see
-        # spec_topics.tier_only.
-        TIER_JOIN_SQL = '''LEFT JOIN user_subjects us
-            ON us.user_id = $1 AND us.exam_board = p.exam_board
-            AND us.subject = p.subject AND us.level = p.level'''
-        TIER_FILTER_SQL = '(st.tier_only IS NULL OR st.tier_only = us.tier)'
+    """Shared candidate-selection logic for the adaptive/exam-questions
+    queue, used both by the initial GET and the endless "more" POST. Returns
+    (questions, focus_reason). topic_mode is 'weak' (default - auto-targets
+    decaying topics/misconceptions), 'random' (ignores weakness targeting,
+    just samples the filtered pool), or 'select' (explicit topic_ids)."""
+    await calculate_decayed_mastery_scores(conn, user_id)
 
-        query = f'''
+    active_misconceptions = await conn.fetch('''
+        SELECT spec_code, tag_id, occurrences
+        FROM student_misconceptions
+        WHERE user_id = $1 AND status = 'active'
+        ORDER BY occurrences DESC
+        LIMIT 3
+    ''', user_id)
+
+    weak_topics_conditions = ["stm.user_id = $1"]
+    weak_topics_params = [user_id]
+    if subject:
+        weak_topics_params.append(exam_board)
+        weak_topics_conditions.append(f"st.exam_board = ${len(weak_topics_params)}")
+        weak_topics_params.append(subject)
+        weak_topics_conditions.append(f"st.subject = ${len(weak_topics_params)}")
+        weak_topics_params.append(level)
+        weak_topics_conditions.append(f"st.level = ${len(weak_topics_params)}")
+
+    weak_topics = await conn.fetch(f'''
+        SELECT stm.spec_topic_id, stm.decay_score, stm.mastery_score
+        FROM student_topic_mastery stm
+        JOIN spec_topics st ON stm.spec_topic_id = st.id
+        WHERE {' AND '.join(weak_topics_conditions)}
+        ORDER BY stm.decay_score ASC
+        LIMIT 3
+    ''', *weak_topics_params)
+
+    weak_commands = await conn.fetch('''
+        SELECT command_word,
+               CASE WHEN marks_possible > 0 THEN (marks_awarded::float / marks_possible) ELSE 0.0 END as acc
+        FROM student_command_word_mastery
+        WHERE user_id = $1 AND marks_possible >= 3
+        ORDER BY acc ASC
+        LIMIT 2
+    ''', user_id)
+
+    TIER_JOIN_SQL = '''LEFT JOIN user_subjects us
+        ON us.user_id = $1 AND us.exam_board = p.exam_board
+        AND us.subject = p.subject AND us.level = p.level'''
+    TIER_FILTER_SQL = '(st.tier_only IS NULL OR st.tier_only = us.tier)'
+
+    base_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, TIER_FILTER_SQL]
+    params = [user_id]
+
+    if subject:
+        params.append(subject)
+        base_conditions.append(f"p.subject = ${len(params)}")
+        params.append(exam_board)
+        base_conditions.append(f"p.exam_board = ${len(params)}")
+        params.append(level)
+        base_conditions.append(f"p.level = ${len(params)}")
+
+    if exclude_ids:
+        params.append(exclude_ids)
+        base_conditions.append(f"NOT (q.id = ANY(${len(params)}))")
+
+    # A question can be classified under more than one spec topic (see
+    # question_topics - schema_phase25) - match against ANY of a question's
+    # topics, not just its primary q.spec_topic_id, so a multi-topic
+    # question surfaces whenever a student targets one it actually covers.
+    if topic_mode == 'select' and topic_ids:
+        params.append(topic_ids)
+        base_conditions.append(
+            f"EXISTS (SELECT 1 FROM question_topics qt WHERE qt.question_id = q.id AND qt.spec_topic_id = ANY(${len(params)}))"
+        )
+    elif topic_mode != 'random':
+        target_topic_ids = [str(r['spec_topic_id']) for r in weak_topics]
+        if target_topic_ids:
+            params.append(target_topic_ids)
+            base_conditions.append(
+                f"EXISTS (SELECT 1 FROM question_topics qt WHERE qt.question_id = q.id AND qt.spec_topic_id = ANY(${len(params)}))"
+            )
+
+    query = f'''
+        SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
+        FROM questions q
+        JOIN papers p ON q.paper_id = p.id
+        LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
+        {TIER_JOIN_SQL}
+        WHERE {' AND '.join(base_conditions)}
+        ORDER BY RANDOM() LIMIT 10
+    '''
+
+    questions = await conn.fetch(query, *params)
+
+    # If not enough questions matched, backfill from the general (still
+    # subject/exclude-filtered, but un-topic-targeted) pool.
+    if len(questions) < 5:
+        fallback_conditions = ["p.status = 'published'", MASTERY_EXCLUSION_SQL, TIER_FILTER_SQL]
+        fallback_params = [user_id]
+        if subject:
+            fallback_params.append(subject)
+            fallback_conditions.append(f"p.subject = ${len(fallback_params)}")
+            fallback_params.append(exam_board)
+            fallback_conditions.append(f"p.exam_board = ${len(fallback_params)}")
+            fallback_params.append(level)
+            fallback_conditions.append(f"p.level = ${len(fallback_params)}")
+        if exclude_ids:
+            fallback_params.append(exclude_ids)
+            fallback_conditions.append(f"NOT (q.id = ANY(${len(fallback_params)}))")
+
+        fallback = await conn.fetch(f'''
             SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
             FROM questions q
             JOIN papers p ON q.paper_id = p.id
             LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
             {TIER_JOIN_SQL}
-            WHERE p.status = 'published' AND {MASTERY_EXCLUSION_SQL} AND {TIER_FILTER_SQL}
-        '''
+            WHERE {' AND '.join(fallback_conditions)}
+            ORDER BY RANDOM()
+            LIMIT 10
+        ''', *fallback_params)
+        questions = list({q['id']: q for q in (list(questions) + list(fallback))}.values())[:10]
 
-        conditions = []
-        params = [user_id]
-        if target_topic_ids:
-            params.append(target_topic_ids)
-            conditions.append(f"q.spec_topic_id = ANY(${len(params)})")
+    # Candidates above are matched per sub-question, so a multi-part
+    # question can come back with only its later parts (the ones that
+    # happen to match the target topic/fallback). Expand each candidate
+    # to its full sibling group so students never see e.g. 08.3-08.6
+    # without 08.1-08.2.
+    questions = await _expand_to_full_groups(conn, questions, max_groups=max_groups)
+    questions = await _attach_previous_answers(conn, user_id, questions)
 
-        if conditions:
-            query += " AND (" + " OR ".join(conditions) + ")"
+    focus_reason = {
+        "active_misconceptions_count": len(active_misconceptions),
+        "weak_topics_count": len(weak_topics),
+        "weakest_command_words": [r['command_word'] for r in weak_commands]
+    }
+    return questions, focus_reason
 
-        query += " ORDER BY RANDOM() LIMIT 10"
 
-        questions = await conn.fetch(query, *params)
+@router.get("/adaptive-queue")
+async def get_adaptive_queue(
+    subject: Optional[str] = None,
+    exam_board: Optional[str] = None,
+    level: Optional[str] = None,
+    topic_mode: str = 'weak',
+    topic_ids: Optional[str] = None,
+    exclude_ids: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db)
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-        # If not enough questions matched, backfill from general pool
-        if len(questions) < 5:
-            fallback = await conn.fetch(f'''
-                SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
-                FROM questions q
-                JOIN papers p ON q.paper_id = p.id
-                LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
-                {TIER_JOIN_SQL}
-                WHERE p.status = 'published' AND {MASTERY_EXCLUSION_SQL} AND {TIER_FILTER_SQL}
-                ORDER BY RANDOM()
-                LIMIT 10
-            ''', user_id)
-            questions = list({q['id']: q for q in (list(questions) + list(fallback))}.values())[:10]
+    async with db.acquire() as conn:
+        questions, focus_reason = await _select_adaptive_candidates(
+            conn, user_id, subject, exam_board, level, topic_mode,
+            _parse_id_list(topic_ids), _parse_id_list(exclude_ids)
+        )
 
-        # Candidates above are matched per sub-question, so a multi-part
-        # question can come back with only its later parts (the ones that
-        # happen to match the target topic/fallback). Expand each candidate
-        # to its full sibling group so students never see e.g. 08.3-08.6
-        # without 08.1-08.2.
-        questions = await _expand_to_full_groups(conn, questions, max_groups=6)
-        questions = await _attach_previous_answers(conn, user_id, questions)
+        # A subject-scoped call is the new per-subject "exam questions" flow
+        # (endless feed); the legacy no-args call from the generic adaptive
+        # queue keeps its original 'adaptive' labelling.
+        mode = 'exam_questions' if subject else 'adaptive'
+        attempt_id = await conn.fetchval('''
+            INSERT INTO attempts (user_id, paper_id, source, mode, title, subject, exam_board, level)
+            VALUES ($1, NULL, 'bank', $2, $3, $4, $5, $6)
+            RETURNING id
+        ''', user_id, mode, (f"{subject} Exam Questions" if subject else "Adaptive Session"),
+            subject, exam_board, level)
+        await _record_attempt_questions(conn, attempt_id, [q['id'] for q in questions])
 
         return {
+            "attempt_id": str(attempt_id),
             "queue": questions,
-            "focus_reason": {
-                "active_misconceptions_count": len(active_misconceptions),
-                "weak_topics_count": len(weak_topics),
-                "weakest_command_words": [r['command_word'] for r in weak_commands]
-            }
+            "focus_reason": focus_reason
+        }
+
+
+@router.post("/adaptive-queue/{attempt_id}/more")
+async def get_more_adaptive_questions(
+    attempt_id: str,
+    topic_mode: str = 'weak',
+    topic_ids: Optional[str] = None,
+    exclude_ids: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db)
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        attempt = await conn.fetchrow(
+            'SELECT * FROM attempts WHERE id = $1 AND user_id = $2', attempt_id, user_id
+        )
+        if not attempt:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        questions, _ = await _select_adaptive_candidates(
+            conn, user_id, attempt['subject'], attempt['exam_board'], attempt['level'],
+            topic_mode, _parse_id_list(topic_ids), _parse_id_list(exclude_ids)
+        )
+
+        next_position = await conn.fetchval(
+            'SELECT COALESCE(MAX(position), -1) + 1 FROM attempt_questions WHERE attempt_id = $1',
+            attempt_id
+        )
+        await _record_attempt_questions(conn, attempt_id, [q['id'] for q in questions], next_position)
+
+        return {"attempt_id": attempt_id, "queue": questions}
+
+
+@router.get("/attempts")
+async def list_attempts(
+    mode: Optional[str] = None,
+    subject: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db)
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        conditions = ["a.user_id = $1", "a.mode IS NOT NULL"]
+        params = [user_id]
+        if mode:
+            params.append(mode)
+            conditions.append(f"a.mode = ${len(params)}")
+        if subject:
+            params.append(subject)
+            conditions.append(f"a.subject = ${len(params)}")
+
+        rows = await conn.fetch(f'''
+            SELECT
+                a.id, a.mode, a.title, a.subject, a.exam_board, a.level,
+                a.started_at, a.completed_at, a.time_limit_seconds, a.total_marks,
+                COUNT(DISTINCT ans.question_id) AS question_count,
+                COALESCE(SUM(ans.marks_awarded), 0) AS marks_earned,
+                COALESCE(SUM(ans.marks_possible), 0) AS marks_possible
+            FROM attempts a
+            LEFT JOIN attempt_questions aq ON aq.attempt_id = a.id
+            LEFT JOIN LATERAL (
+                SELECT DISTINCT ON (question_id) question_id, marks_awarded, marks_possible
+                FROM answers
+                WHERE attempt_id = a.id AND question_id = aq.question_id
+                ORDER BY question_id, created_at DESC
+            ) ans ON true
+            WHERE {' AND '.join(conditions)}
+            GROUP BY a.id
+            ORDER BY a.started_at DESC
+        ''', *params)
+
+        return [dict(r) for r in rows]
+
+
+@router.get("/attempts/{attempt_id}")
+async def get_attempt_detail(
+    attempt_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db)
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    async with db.acquire() as conn:
+        attempt = await conn.fetchrow(
+            'SELECT * FROM attempts WHERE id = $1 AND user_id = $2', attempt_id, user_id
+        )
+        if not attempt:
+            raise HTTPException(status_code=404, detail="Attempt not found")
+
+        rows = await conn.fetch('''
+            SELECT q.*, p.exam_board, p.subject, p.paper_code, st.spec_code, st.title as topic_title
+            FROM attempt_questions aq
+            JOIN questions q ON q.id = aq.question_id
+            JOIN papers p ON q.paper_id = p.id
+            LEFT JOIN spec_topics st ON q.spec_topic_id = st.id
+            WHERE aq.attempt_id = $1
+            ORDER BY aq.position ASC
+        ''', attempt_id)
+
+        questions = await _attach_answers_for_attempt(conn, attempt_id, rows)
+
+        # A custom paper's questions were shown to the student under
+        # sequential display numbers (1.1, 1.2, 2.1...) rather than their
+        # original bank question_number - purely a rendering choice made
+        # once at generation time (_renumber_for_custom_paper), never
+        # persisted anywhere. Reproduce the identical renumbering here so
+        # History/Review shows the same numbers the student actually saw,
+        # instead of the original source-paper numbers ("06.1", "01.1")
+        # they never cross-reference against. This is deterministic and
+        # reproduces the exact original numbering because attempt_questions
+        # was recorded in this same position order right after renumbering.
+        if attempt['mode'] == 'custom':
+            questions = _renumber_for_custom_paper(questions)
+
+        return {
+            "attempt": dict(attempt),
+            "questions": questions
         }
 
 @router.post("/custom-paper")
@@ -357,8 +618,14 @@ async def generate_custom_paper(
             conditions.append(f"p.exam_board = ${len(params)}")
 
         if req.spec_topic_ids:
+            # See adaptive queue's matching comment above - a question can
+            # cover more than one spec topic, so match against ANY of its
+            # topics via question_topics rather than only its primary
+            # q.spec_topic_id.
             params.append(req.spec_topic_ids)
-            conditions.append(f"q.spec_topic_id = ANY(${len(params)})")
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM question_topics qt WHERE qt.question_id = q.id AND qt.spec_topic_id = ANY(${len(params)}))"
+            )
 
         params.append(student_tier)
         conditions.append(f"(st.tier_only IS NULL OR st.tier_only = ${len(params)})")
@@ -389,21 +656,26 @@ async def generate_custom_paper(
         # question_number, so it must stay untouched until they're done.
         questions = _renumber_for_custom_paper(questions)
 
-        attempt_id = await conn.fetchval('''
-            INSERT INTO attempts (user_id, paper_id, source)
-            VALUES ($1, NULL, 'custom_generated')
-            RETURNING id
-        ''', user_id)
-
         total_marks = sum(q['mark_value'] for q in questions)
         if configured_time_limit_minutes:
             time_limit_seconds = configured_time_limit_minutes * 60
         else:
             time_limit_seconds = max(total_marks * DEFAULT_SECONDS_PER_MARK, MIN_CUSTOM_PAPER_TIME_LIMIT_SECONDS)
 
+        title = f"{req.subject} Mock Paper"
+        attempt_id = await conn.fetchval('''
+            INSERT INTO attempts (
+                user_id, paper_id, source, mode, title, subject, exam_board, level,
+                time_limit_seconds, total_marks
+            )
+            VALUES ($1, NULL, 'custom_generated', 'custom', $2, $3, $4, $5, $6, $7)
+            RETURNING id
+        ''', user_id, title, req.subject, req.exam_board, req.level, time_limit_seconds, total_marks)
+        await _record_attempt_questions(conn, attempt_id, [q['id'] for q in questions])
+
         return {
             "attempt_id": str(attempt_id),
-            "title": f"Custom {req.subject} Mock Paper",
+            "title": title,
             "questions": questions,
             "total_marks": total_marks,
             "target_marks": target_marks,

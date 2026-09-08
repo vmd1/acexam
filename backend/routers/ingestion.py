@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dependencies import rate_limit, get_current_admin_id
 from database import get_db
 import ingestion
 import ai_pipeline
+import storage
 import asyncpg
 import fitz
 import json
+import hashlib
 
 router = APIRouter(dependencies=[Depends(rate_limit), Depends(get_current_admin_id)])
 
@@ -19,10 +21,18 @@ class UpdateQuestionRequest(BaseModel):
     marking_dsl: Optional[str] = None
     mark_scheme_text: Optional[str] = None
     needs_review: Optional[bool] = None
+    images: Optional[List[Dict[str, Any]]] = None
 
 class ApproveMisconceptionRequest(BaseModel):
     spec_code: str
     tag_id: str
+
+class ApproveMisconceptionEntry(BaseModel):
+    spec_code: str
+    tag_id: str
+
+class BulkApproveMisconceptionsRequest(BaseModel):
+    tags: List[ApproveMisconceptionEntry]
 
 @router.post("/upload")
 async def upload_paper(
@@ -120,15 +130,20 @@ async def upload_paper(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Ingestion Pipeline failed: {str(e)}")
 
-    mock_s3_url = f"https://cdn.acexam.app/papers/{file.filename}"
+    # Real object storage (MinIO locally, any S3-compatible service in prod)
+    # for the original uploaded PDF - checksum-keyed so re-uploading the
+    # identical file is a no-op rather than a new object every time.
+    source_pdf_url = await storage.upload_bytes(
+        f"papers/{hashlib.sha256(qp_bytes).hexdigest()}.pdf", qp_bytes, "application/pdf"
+    )
 
     async with db.acquire() as conn:
         # 1. Create Paper Record
         paper_id = await conn.fetchval('''
-            INSERT INTO papers (exam_board, subject, paper_code, series, source_pdf_url, status, uploaded_by, level, tier)
-            VALUES ($1, $2, $3, $4, $5, 'needs_review', $6, $7, $8)
+            INSERT INTO papers (exam_board, subject, paper_code, series, source_pdf_url, status, uploaded_by, level, tier, ingestion_token_usage)
+            VALUES ($1, $2, $3, $4, $5, 'needs_review', $6, $7, $8, $9)
             RETURNING id
-        ''', exam_board, subject, paper_code, series, mock_s3_url, user_id, level, tier)
+        ''', exam_board, subject, paper_code, series, source_pdf_url, user_id, level, tier, json.dumps(results.get("token_usage", {})))
 
         # 2. Resolve each known topic's spec_code to its id, for per-question classification
         topic_id_by_code = {r["spec_code"]: r["id"] for r in await conn.fetch(
@@ -136,33 +151,50 @@ async def upload_paper(
             exam_board, subject, level
         )}
 
-        # 3. Insert Extracted Questions. A question the AI couldn't
-        # confidently classify against a known topic is left uncategorized
-        # (spec_topic_id NULL) rather than dumped under one manually-picked
-        # fallback topic - needs_review already flags it for admin attention.
-        # Maps a question's own paper-scoped number (e.g. "3(b)(ii)") to its
-        # freshly-assigned id, so the synthetic training examples generated
-        # per-question by the pipeline (step 7 below) can be linked to a
-        # question_id that didn't exist until this insert ran.
+        # 3. Insert Extracted Questions. A question can genuinely test more
+        # than one spec topic (see ingestion.py's topic_spec_codes) - every
+        # code the AI splitter confidently matched gets resolved to an id and
+        # linked via question_topics below, while spec_topic_id keeps the
+        # FIRST/primary match for every existing single-topic consumer
+        # (mastery tracking, analytics grouping, topic name display). A
+        # question with no confident match at all is left uncategorized
+        # (spec_topic_id NULL, no question_topics rows) rather than dumped
+        # under one manually-picked fallback topic - needs_review already
+        # flags it for admin attention. Maps a question's own paper-scoped
+        # number (e.g. "3(b)(ii)") to its freshly-assigned id, so the
+        # synthetic training examples generated per-question by the pipeline
+        # (step 7 below) can be linked to a question_id that didn't exist
+        # until this insert ran.
         question_id_by_number: dict[str, str] = {}
         for q in results.get("questions", []):
-            question_topic_id = topic_id_by_code.get(q.get("topic_spec_code"))
+            topic_ids = [
+                topic_id_by_code[code] for code in (q.get("topic_spec_codes") or [])
+                if code in topic_id_by_code
+            ]
+            primary_topic_id = topic_ids[0] if topic_ids else None
             question_id = await conn.fetchval('''
                 INSERT INTO questions (
                     paper_id, question_number, mark_value, question_text,
                     images, marking_type, marking_dsl, mark_scheme_text,
-                    needs_review, spec_topic_id, answer_type, answer_options
+                    needs_review, spec_topic_id, answer_type, answer_options, table_data
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 RETURNING id
             ''',
                 paper_id, q["question_number"], q["mark_value"], q["question_text"],
                 json.dumps(q.get("images", [])), q["marking_type"], q.get("marking_dsl"),
-                q.get("mark_scheme_text"), q.get("needs_review", False), question_topic_id,
+                q.get("mark_scheme_text"), q.get("needs_review", False), primary_topic_id,
                 q.get("answer_type", "written"),
-                json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None
+                json.dumps(q["answer_options"]) if q.get("answer_options") is not None else None,
+                json.dumps(q["table_data"]) if q.get("table_data") is not None else None
             )
             question_id_by_number[q["question_number"]] = question_id
+            if topic_ids:
+                await conn.executemany('''
+                    INSERT INTO question_topics (question_id, spec_topic_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                ''', [(question_id, tid) for tid in topic_ids])
 
         # 4. Save Proposed Misconceptions (§6.2a). Each is already classified
         # against a known topic by the scanner; misconception_taxonomy.spec_code
@@ -186,17 +218,18 @@ async def upload_paper(
             await conn.execute('''
                 INSERT INTO training_examples (
                     question_id, spec_code, candidate_answer, target_marks,
-                    awarded_marks, is_accepted_for_training, feedback_text,
-                    missed_points, misconception_tags
+                    awarded_marks, is_accepted_for_training, www,
+                    missed_points, misconception_tags, source
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ''',
                 question_id, te.get("spec_code") or None, te.get("student_answer", ""),
                 te.get("target_marks", 0), te.get("awarded_marks", 0),
                 bool(te.get("is_accepted_for_training", False)),
-                te.get("feedback_text") or None,
+                json.dumps(te.get("www", [])),
                 json.dumps(te.get("missed_points", [])),
-                json.dumps(te.get("misconception_tags", []))
+                json.dumps(te.get("misconception_tags", [])),
+                te.get("source", "synthetic")
             )
 
     return {
@@ -214,17 +247,23 @@ async def upload_paper(
 @router.post("/upload-spec")
 async def upload_specification(
     file: UploadFile = File(...),
+    exam_board: str = Form(...),
+    subject: str = Form(...),
+    level: str = Form(...),
     db=Depends(get_db)
 ):
     """
-    Pre-populates spec_topics from the official exam board specification
+    Creates/updates a qualification (§ Manage Subjects "Add subject") and
+    pre-populates its spec_topics from the official exam board specification
     document, so the full topic hierarchy exists before any past paper is
     ingested (rather than admins hand-typing one spec_code per paper upload).
 
-    Exam board, subject and level are read off the document itself (its
-    cover page/branding) rather than admin-selected - the spec PDF already
-    states these, so asking the admin to also pick them from a dropdown is
-    redundant and error-prone (mismatches would silently misfile topics).
+    Exam board, subject and level are admin-supplied (the identity of the
+    qualification being added/updated) rather than parsed off the document's
+    own cover page/branding - relying on a PDF's own formatting for this was
+    fragile (mismatches would silently misfile topics under the wrong
+    qualification). Only the topic hierarchy and tiers are derived from the
+    document text itself, since those aren't practical to hand-type.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Specification must be a PDF file")
@@ -238,17 +277,10 @@ async def upload_specification(
     result = await ai_pipeline.extract_spec_topics_from_text(spec_text)
     topics = result["topics"]
     tiers = result["tiers"]
+    target_marks = result.get("target_marks")
+    time_limit_minutes = result.get("time_limit_minutes")
     if not topics:
         raise HTTPException(status_code=422, detail="Could not extract any topics from this specification document")
-
-    exam_board = result.get("exam_board")
-    subject = result.get("subject")
-    level = result.get("level")
-    if not exam_board or not subject or not level:
-        raise HTTPException(
-            status_code=422,
-            detail="Could not determine exam board, subject and level from this specification document"
-        )
 
     async with db.acquire() as conn:
         code_to_id = {}
@@ -272,11 +304,20 @@ async def upload_specification(
         # Record this qualification's tiers (e.g. Higher/Foundation), as
         # stated by the specification itself - drives the tier step in the
         # frontend subject picker. Empty tiers = no tier step (e.g. A-Level).
+        # target_marks/time_limit_minutes (Manage Subjects "Custom paper
+        # settings") are pre-filled from the same document's "Scheme of
+        # assessment" section when extractable - but only ever fill a still-
+        # NULL value (COALESCE keeps whatever's already stored), so
+        # re-uploading a spec to refresh topics never silently overwrites an
+        # admin's own deliberate edit to these two fields.
         await conn.execute('''
-            INSERT INTO qualifications (exam_board, level, subject, tiers)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (exam_board, level, subject) DO UPDATE SET tiers = EXCLUDED.tiers
-        ''', exam_board, level, subject, tiers)
+            INSERT INTO qualifications (exam_board, level, subject, tiers, custom_paper_target_marks, custom_paper_time_limit_minutes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (exam_board, level, subject) DO UPDATE SET
+                tiers = EXCLUDED.tiers,
+                custom_paper_target_marks = COALESCE(qualifications.custom_paper_target_marks, EXCLUDED.custom_paper_target_marks),
+                custom_paper_time_limit_minutes = COALESCE(qualifications.custom_paper_time_limit_minutes, EXCLUDED.custom_paper_time_limit_minutes)
+        ''', exam_board, level, subject, tiers, target_marks, time_limit_minutes)
 
     return {
         "message": "Specification parsed and topics created.",
@@ -284,6 +325,8 @@ async def upload_specification(
         "exam_board": exam_board,
         "subject": subject,
         "level": level,
+        "target_marks": target_marks,
+        "time_limit_minutes": time_limit_minutes,
     }
 
 @router.get("/papers")
@@ -348,7 +391,15 @@ async def update_admin_question(
         if req.needs_review is not None:
             params.append(req.needs_review)
             fields.append(f"needs_review = ${len(params)}")
-            
+        if req.images is not None:
+            # Admin-facing removal of a mis-cropped/wrong/duplicate image
+            # (§3.1's re-cropping workflow only covers re-cropping, not
+            # deletion) - the full replacement array, not a single id, since
+            # that's what the edit form already holds after a client-side
+            # removal.
+            params.append(json.dumps(req.images))
+            fields.append(f"images = ${len(params)}::jsonb")
+
         if fields:
             query = f"UPDATE questions SET {', '.join(fields)} WHERE id = $1"
             await conn.execute(query, *params)
@@ -383,12 +434,55 @@ async def delete_paper(paper_id: str, db=Depends(get_db)):
         return {"status": "success", "message": "Paper deleted"}
 
 @router.get("/misconceptions")
-async def list_misconceptions(db=Depends(get_db)):
+async def list_misconceptions(
+    exam_board: Optional[str] = Query(None),
+    level: Optional[str] = Query(None),
+    subject: Optional[str] = Query(None),
+    db=Depends(get_db)
+):
+    """
+    misconception_taxonomy only stores spec_code (the fine-grained topic
+    point, e.g. '4.2.2.1') - not exam_board/level/subject directly - so
+    scoping this to one subject's admin page means joining through
+    spec_topics, the table that actually owns that (exam_board, level,
+    subject, spec_code) scoping (idx_spec_topics_code). Omitting all three
+    filters returns the full unscoped taxonomy, same as before.
+    """
     if not db:
         raise HTTPException(status_code=500, detail="Internal server error")
     async with db.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM misconception_taxonomy ORDER BY approved_at DESC NULLS LAST, created_at DESC")
+        if exam_board and level and subject:
+            rows = await conn.fetch('''
+                SELECT DISTINCT mt.*
+                FROM misconception_taxonomy mt
+                JOIN spec_topics st
+                    ON st.spec_code = mt.spec_code
+                    AND st.exam_board = $1 AND st.level = $2 AND st.subject = $3
+                ORDER BY mt.approved_at DESC NULLS LAST, mt.created_at DESC
+            ''', exam_board, level, subject)
+        else:
+            rows = await conn.fetch("SELECT * FROM misconception_taxonomy ORDER BY approved_at DESC NULLS LAST, created_at DESC")
         return [dict(r) for r in rows]
+
+@router.post("/misconception/approve-all")
+async def approve_all_misconceptions(req: BulkApproveMisconceptionsRequest, db=Depends(get_db)):
+    """
+    SubjectMisconceptions "Approve all" - one round trip for every pending
+    tag instead of the frontend firing a separate approve request per tag
+    (which was both slower and the kind of burst that trips the per-user
+    rate limit).
+    """
+    if not db:
+        raise HTTPException(status_code=500, detail="Internal server error")
+    if not req.tags:
+        return {"status": "success", "message": "No tags to approve", "approved": 0}
+    async with db.acquire() as conn:
+        await conn.executemany('''
+            UPDATE misconception_taxonomy
+            SET approved_at = now()
+            WHERE spec_code = $1 AND tag_id = $2
+        ''', [(t.spec_code, t.tag_id) for t in req.tags])
+    return {"status": "success", "message": f"Approved {len(req.tags)} misconception tags", "approved": len(req.tags)}
 
 @router.post("/misconception/approve")
 async def approve_misconception(req: ApproveMisconceptionRequest, db=Depends(get_db)):

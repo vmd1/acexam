@@ -12,3 +12,4 @@ PyMuPDF
 pdfplumber
 Pillow
 sympy
+boto3

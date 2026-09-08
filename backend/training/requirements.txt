@@ -1,0 +1,15 @@
+# Deps for the host-native training/serving pipeline (assemble_dataset.py,
+# train_lora.py, evaluate.py, agent.py) - kept separate from
+# backend/requirements.txt because mlx-lm is Metal-only (Apple Silicon) and
+# would break the backend's Linux container build.
+#
+# Install into your own venv on the Mac, e.g.:
+#   cd backend/training && python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+
+mlx-lm
+asyncpg
+httpx
+redis
+python-dotenv
+pyyaml

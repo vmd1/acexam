@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import api, { extractErrorMessage } from './api';
 import SubjectsManager from './SubjectsManager';
@@ -9,7 +10,12 @@ const YEAR_GROUPS = ['Year 7', 'Year 8', 'Year 9', 'Year 10', 'Year 11', 'Year 1
 export default function ManageAccount() {
   const { user, login } = useAuth();
   const [displayName, setDisplayName] = useState(user?.display_name || '');
-  const [yearGroup, setYearGroup] = useState(user?.year_group || YEAR_GROUPS[0]);
+  // Default to "not set" rather than silently pre-selecting the first
+  // option (Year 7) - that always displayed as a real value even when the
+  // student never chose one, and saving any other unrelated field on this
+  // form (e.g. just editing their name) would then persist "Year 7" as if
+  // they'd explicitly picked it, which is well below typical GCSE age.
+  const [yearGroup, setYearGroup] = useState(user?.year_group || '');
   const [profileMsg, setProfileMsg] = useState('');
   const [profileError, setProfileError] = useState('');
 
@@ -101,6 +107,7 @@ export default function ManageAccount() {
           <div className="form-group">
             <label htmlFor="account-year">Year group</label>
             <select id="account-year" value={yearGroup} onChange={e => setYearGroup(e.target.value)} className="form-control">
+              <option value="">Not set</option>
               {YEAR_GROUPS.map(y => <option key={y} value={y}>{y}</option>)}
             </select>
           </div>
@@ -164,6 +171,12 @@ export default function ManageAccount() {
             Update password
           </button>
         </form>
+      </div>
+
+      <div className="sidebar-legal-links" style={{ marginTop: '2rem' }}>
+        <Link to="/terms">Terms &amp; Conditions</Link>
+        <span aria-hidden="true">·</span>
+        <Link to="/privacy">Privacy Policy</Link>
       </div>
     </div>
   );

@@ -4,7 +4,46 @@ import type { Question, AnswerOption, GridRow } from './types';
 import { formatUnits } from './formatUnits';
 import Markdown from './Markdown';
 import MathInput from './MathInput';
-import { Pen, Highlighter, Eraser, Undo2, Trash2, CheckCircle2, XCircle, AlertCircle, ArrowRight } from 'lucide-react';
+import { Pen, Highlighter, Eraser, Undo2, Trash2, CheckCircle2, XCircle, AlertCircle, ArrowRight, Check, X, Info } from 'lucide-react';
+import { useAuth } from './AuthContext';
+
+// Synthesizes the one-line personalized summary shown under the www/ebi
+// checklist - the model's JSON schema (marks_awarded/www/ebi/
+// misconception_tags) has no dedicated "summary"/"tip" field, and adding
+// one would require another training pass on the live self-hosted adapter,
+// so this is built client-side from data the model already returns: a
+// forward-looking "remember to" tip built from the first ebi point when the
+// student didn't get full marks - ebi bullets are already phrased as
+// concrete additions the student could make (see marking_prompt.py's system
+// prompt), so they read naturally as a tip without needing to be reworded
+// here. Deliberately never quotes a www point - every www point is already
+// shown verbatim in the checklist directly above this summary, so repeating
+// one here would just be the same sentence twice.
+function buildFeedbackSummary(name: string | null, marksAwarded: number, marksPossible: number, missed: string[]): string {
+  const addressee = name || 'You';
+  const markWord = marksAwarded === 1 ? 'mark' : 'marks';
+  // Only quote the actual missed-point text when there's exactly one - the
+  // ebi checklist right above already lists every missed point, so echoing
+  // all of them here would just be redundant. With more than one, refer to
+  // them collectively instead of repeating the list.
+  const tipLower = missed.length === 1
+    ? missed[0]
+    : missed.length > 1
+    ? `there are ${missed.length} points still to pick up here - see the list above`
+    : '';
+  const tipSentence = tipLower ? tipLower[0].toUpperCase() + tipLower.slice(1) : '';
+
+  if (marksAwarded === marksPossible) {
+    return `Well done, ${addressee} - that's full marks!`;
+  }
+  if (marksAwarded === 0) {
+    return tipLower
+      ? `${addressee}, this one didn't score against the mark scheme, but here's what to focus on next time: ${tipLower}`
+      : `${addressee}, this one didn't score against the mark scheme this time.`;
+  }
+  const opening = `${addressee}, you gained ${marksAwarded} ${markWord} here.`;
+  return tipSentence ? `${opening} ${tipSentence}` : opening;
+}
 
 function parseJsonMaybe<T>(value: T | string | null | undefined, fallback: T): T {
   if (value == null) return fallback;
@@ -38,6 +77,12 @@ function clearAllDrafts(qid: string) {
 
 interface ExamCanvasProps {
   questions: Question[];
+  attemptId?: string;
+  // Reopening a saved paper/session (AttemptHistory/SubjectPractice ->
+  // PracticeSession's "review" mode) - lets a full-marks answer be
+  // re-attempted, which a live practice session deliberately doesn't offer
+  // (full marks there means "done, don't re-serve").
+  reviewMode?: boolean;
   onAnswerSubmitted?: (result: any) => void;
   onNext?: () => void;
   nextLabel?: string;
@@ -46,7 +91,9 @@ interface ExamCanvasProps {
 type Mode = 'typed' | 'canvas';
 type Tool = 'pen' | 'highlighter' | 'eraser';
 
-export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextLabel = 'Next question' }: ExamCanvasProps) {
+export default function ExamCanvas({ questions, attemptId, reviewMode = false, onAnswerSubmitted, onNext, nextLabel = 'Next question' }: ExamCanvasProps) {
+  const { user } = useAuth();
+  const studentFirstName = (user?.display_name || '').trim().split(' ')[0] || null;
   const groupKey = questions.map(q => q.id).join('|');
 
   const [modes, setModes] = useState<Record<string, Mode>>({});
@@ -103,6 +150,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
           marks_awarded: prev.marks_awarded,
           marks_possible: prev.marks_possible,
           feedback_text: prev.feedback_text,
+          www: parseJsonMaybe<string[]>(prev.www, []),
           missed_points: parseJsonMaybe<string[]>(prev.missed_points, []),
           misconception_tags: parseJsonMaybe<string[]>(prev.misconception_tags, []),
           marked_by: prev.marked_by,
@@ -334,6 +382,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
 
       const res = await api.post('/feedback/submit', {
         question_id: qid,
+        attempt_id: attemptId,
         answer_text: answerText || 'Answer submitted via drawing canvas',
         answer_image_url: canvasDataUrl
       });
@@ -396,11 +445,17 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
           ? (() => { try { return JSON.parse(question.answer_options as any); } catch { return null; } })()
           : question.answer_options;
 
-        const imagesList = Array.isArray(question.images)
+        // Ingestion links each sub-question to only the specific image(s)/
+        // table(s) it actually references (see backend/ingestion.py), so
+        // this question's own `images`/`table_data` is already exactly
+        // what should render here - no group-wide "shared reference" block
+        // or caption-text matching needed.
+        const questionImages: any[] = Array.isArray(question.images)
           ? question.images
-          : (typeof question.images === 'string'
-              ? (() => { try { return JSON.parse(question.images as any); } catch { return []; } })()
-              : []);
+          : (typeof question.images === 'string' ? (() => { try { return JSON.parse(question.images as any); } catch { return []; } })() : []);
+        const questionTables: any[][][] = Array.isArray(question.table_data)
+          ? question.table_data
+          : (typeof question.table_data === 'string' ? (() => { try { return JSON.parse(question.table_data as any); } catch { return []; } })() : []);
 
         // Shared header (topic tag, question text, mark value, images) used
         // by both the practical and normal-input rendering below.
@@ -426,14 +481,14 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
               </div>
             </div>
 
-            {imagesList.length > 0 && (
-              <div style={{ marginBottom: '1.5rem', textAlign: 'center', background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                {imagesList.map((img: any, i: number) => (
+            {questionImages.length > 0 && (
+              <div style={{ marginBottom: '1.5rem', textAlign: 'center' }}>
+                {questionImages.map((img: any, i: number) => (
                   <div key={i} style={{ display: 'inline-block', margin: '0.5rem' }}>
                     <img
                       src={img.url}
                       alt={img.caption || `Figure for Q${question.question_number}`}
-                      style={{ maxWidth: '100%', maxHeight: '350px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                      style={{ maxWidth: '100%', maxHeight: '300px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
                     />
                     {img.caption && (
                       <div style={{ marginTop: '0.4rem', fontSize: '0.85rem', fontWeight: 600, color: '#475569', fontFamily: 'sans-serif' }}>
@@ -444,6 +499,26 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                 ))}
               </div>
             )}
+
+            {questionTables.map((rows, ti) => (
+              <div key={ti} style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9rem', fontFamily: 'sans-serif' }}>
+                  <tbody>
+                    {rows.map((row: any[], ri: number) => (
+                      <tr key={ri}>
+                        {row.map((cell: any, ci: number) => (
+                          ri === 0 ? (
+                            <th key={ci} style={{ border: '1px solid #cbd5e1', padding: '0.4rem 0.6rem', background: '#eef2f7', textAlign: 'left', fontWeight: 700 }}>{cell ?? ''}</th>
+                          ) : (
+                            <td key={ci} style={{ border: '1px solid #cbd5e1', padding: '0.4rem 0.6rem' }}>{cell ?? ''}</td>
+                          )
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
           </>
         );
 
@@ -512,15 +587,19 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
             {/* Input Mode Switcher & Tools (written answers only) */}
             {!markingResult && answerType === 'written' && (
               <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
                 background: '#f8fafc',
                 padding: '0.5rem 0.75rem',
                 borderRadius: '8px',
                 marginBottom: '1rem',
                 fontFamily: 'sans-serif',
                 fontSize: '0.85rem'
+              }}>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '0.4rem'
               }}>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
@@ -594,6 +673,12 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                   </div>
                 )}
               </div>
+              <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '0.35rem' }}>
+                {mode === 'canvas'
+                  ? 'Ink Canvas is a scratch space for your own reference - it is stored with your answer but never marked. Only your typed answer is graded.'
+                  : 'Switch to Ink Canvas to sketch or work out your answer by hand. Note: drawings are never marked - your typed answer is the only thing graded.'}
+              </div>
+              </div>
             )}
 
             {/* Previous attempt banner - shown when reopening a question that
@@ -628,6 +713,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                         marks_awarded: previousAnswers[qid]!.marks_awarded,
                         marks_possible: previousAnswers[qid]!.marks_possible,
                         feedback_text: previousAnswers[qid]!.feedback_text,
+                        www: parseJsonMaybe<string[]>(previousAnswers[qid]!.www, []),
                         missed_points: parseJsonMaybe<string[]>(previousAnswers[qid]!.missed_points, []),
                         misconception_tags: parseJsonMaybe<string[]>(previousAnswers[qid]!.misconception_tags, []),
                         marked_by: previousAnswers[qid]!.marked_by,
@@ -740,7 +826,10 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                           : setAnswerTexts(prev => ({ ...prev, [qid]: opt.key }))
                         }
                       />
-                      <span><strong>{opt.key}:</strong> {opt.text}</span>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.35em' }}>
+                        {opt.key.trim().toLowerCase() !== opt.text.trim().toLowerCase() && <strong>{opt.key}:</strong>}
+                        <Markdown>{opt.text}</Markdown>
+                      </div>
                     </label>
                   );
                 })}
@@ -823,6 +912,26 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                       {markingResult.marks_awarded} / {markingResult.marks_possible} marks awarded
                     </strong>
                   </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    {reviewMode && markingResult.is_full_marks && (
+                      <button
+                        onClick={() => setMarkingResults(prev => {
+                          const next = { ...prev };
+                          delete next[qid];
+                          return next;
+                        })}
+                        style={{
+                          background: 'transparent',
+                          border: '1px solid #94a3b8',
+                          borderRadius: '4px',
+                          padding: '0.25rem 0.6rem',
+                          fontSize: '0.8rem',
+                          cursor: 'pointer',
+                          color: '#334155'
+                        }}>
+                        Reattempt
+                      </button>
+                    )}
                   <button
                     onClick={() => setShowMarkScheme(prev => ({ ...prev, [qid]: !prev[qid] }))}
                     style={{
@@ -836,6 +945,7 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                     }}>
                     {showMarkScheme[qid] ? 'Hide Mark Scheme' : 'View Mark Scheme'}
                   </button>
+                  </div>
                 </div>
 
                 <div style={{ marginBottom: '1rem', padding: '0.75rem', background: '#ffffff', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
@@ -852,7 +962,9 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                     <div style={{ color: '#0f172a' }}>
                       {answerText.split(',').map(s => s.trim()).filter(Boolean).map(key => {
                         const opt = ((answerOptions as AnswerOption[]) || []).find(o => o.key === key);
-                        return <div key={key}>{opt ? `${opt.key}: ${opt.text}` : key}</div>;
+                        if (!opt) return <div key={key}>{key}</div>;
+                        const sameAsText = opt.key.trim().toLowerCase() === opt.text.trim().toLowerCase();
+                        return <div key={key}>{sameAsText ? opt.text : `${opt.key}: ${opt.text}`}</div>;
                       })}
                     </div>
                   ) : answerType === 'numeric' ? (
@@ -873,19 +985,64 @@ export default function ExamCanvas({ questions, onAnswerSubmitted, onNext, nextL
                   )}
                 </div>
 
-                <div style={{ color: '#334155', lineHeight: '1.5', fontSize: '0.95rem' }}>
-                  <Markdown>{markingResult.feedback_text}</Markdown>
-                </div>
-
-                {markingResult.missed_points && markingResult.missed_points.length > 0 && (
-                  <div style={{ marginTop: '0.75rem' }}>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#be123c', textTransform: 'uppercase' }}>Missed Points:</span>
-                    <ul style={{ margin: '0.25rem 0 0 1.25rem', padding: 0, color: '#475569', fontSize: '0.9rem' }}>
-                      {markingResult.missed_points.map((p: string, i: number) => (
-                        <li key={i}>{p}</li>
+                {markingResult.marked_by === 'ai' && ((markingResult.www?.length ?? 0) > 0 || (!markingResult.is_full_marks && (markingResult.missed_points?.length ?? 0) > 0)) ? (
+                  <>
+                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                      {(markingResult.www || []).map((point: string, i: number) => (
+                        <li key={`www-${i}`} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', color: '#166534', fontSize: '0.92rem', lineHeight: 1.4 }}>
+                          <Check size={16} aria-hidden="true" style={{ flexShrink: 0, marginTop: '0.15rem' }} />
+                          <span>{point}</span>
+                        </li>
+                      ))}
+                      {!markingResult.is_full_marks && (markingResult.missed_points || []).map((point: string, i: number) => (
+                        <li key={`ebi-${i}`} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', color: '#9f1239', fontSize: '0.92rem', lineHeight: 1.4 }}>
+                          <X size={16} aria-hidden="true" style={{ flexShrink: 0, marginTop: '0.15rem' }} />
+                          <span>{point}</span>
+                        </li>
                       ))}
                     </ul>
-                  </div>
+
+                    <div style={{
+                      marginTop: '0.85rem',
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '0.5rem',
+                      padding: '0.65rem 0.8rem',
+                      background: '#eff6ff',
+                      border: '1px solid #bfdbfe',
+                      borderRadius: '8px',
+                      color: '#1e40af',
+                      fontSize: '0.88rem',
+                      lineHeight: 1.45
+                    }}>
+                      <Info size={16} aria-hidden="true" style={{ flexShrink: 0, marginTop: '0.15rem' }} />
+                      <span>
+                        {buildFeedbackSummary(
+                          studentFirstName,
+                          markingResult.marks_awarded,
+                          markingResult.marks_possible,
+                          markingResult.is_full_marks ? [] : (markingResult.missed_points || [])
+                        )}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ color: '#334155', lineHeight: '1.5', fontSize: '0.95rem' }}>
+                      <Markdown>{markingResult.feedback_text}</Markdown>
+                    </div>
+
+                    {!markingResult.is_full_marks && markingResult.missed_points && markingResult.missed_points.length > 0 && (
+                      <div style={{ marginTop: '0.75rem' }}>
+                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#be123c', textTransform: 'uppercase' }}>Missed Points:</span>
+                        <ul style={{ margin: '0.25rem 0 0 1.25rem', padding: 0, color: '#475569', fontSize: '0.9rem' }}>
+                          {markingResult.missed_points.map((p: string, i: number) => (
+                            <li key={i}>{p}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {markingResult.misconception_tags && markingResult.misconception_tags.length > 0 && (

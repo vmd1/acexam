@@ -2,10 +2,7 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   GraduationCap,
   ClipboardList,
-  FileEdit,
-  LineChart,
-  UploadCloud,
-  ShieldCheck,
+  History,
   Settings,
   LogOut,
   Sun,
@@ -35,11 +32,8 @@ function useNavItems(): NavItem[] {
   const items: NavItem[] = [
     { to: '/app', label: 'Practice', icon: <ClipboardList size={20} /> },
   ];
-  if (user) items.push({ to: '/app/custom-papers', label: 'Custom Papers', icon: <FileEdit size={20} /> });
-  if (user) items.push({ to: '/analytics', label: 'Analytics', icon: <LineChart size={20} /> });
+  if (user) items.push({ to: '/app/history', label: 'History', icon: <History size={20} /> });
   if (user?.is_admin) {
-    items.push({ to: '/admin/ingestion', label: 'Upload paper', icon: <UploadCloud size={20} /> });
-    items.push({ to: '/admin/review', label: 'Admin console', icon: <ShieldCheck size={20} /> });
     items.push({ to: '/admin/subjects', label: 'Manage Subjects', icon: <Settings size={20} /> });
   }
   return items;
@@ -74,6 +68,7 @@ export default function Sidebar({ theme, onToggleTheme, collapsed, onToggleColla
           <li key={item.to}>
             <NavLink
               to={item.to}
+              end={item.to === '/app'}
               className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}
               title={collapsed ? item.label : undefined}
             >
@@ -111,6 +106,13 @@ export default function Sidebar({ theme, onToggleTheme, collapsed, onToggleColla
             </button>
           )}
         </div>
+        {!collapsed && (
+          <div className="sidebar-legal-links">
+            <Link to="/terms">Terms</Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/privacy">Privacy</Link>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -126,6 +128,7 @@ export function BottomTabBar() {
         <NavLink
           key={item.to}
           to={item.to}
+          end={item.to === '/app'}
           className={({ isActive }) => `bottom-tabbar-link${isActive ? ' active' : ''}`}
         >
           {item.icon}

@@ -1,0 +1,55 @@
+{
+  "spec_slug": "aqa-gcse-biology-higher",
+  "model": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+  "adapter_path": null,
+  "n_test": 50,
+  "held_out_total": 94,
+  "sampled": true,
+  "n_json_parsed": 47,
+  "json_parse_rate": 0.94,
+  "marks_awarded_exact_match_rate": 0.7446808510638298,
+  "www_overlap_f1_mean": 0.7354271152286855,
+  "ebi_overlap_f1_mean": 0.2963986693865668,
+  "misconception_tags_overlap_f1_mean": 0.6595744680851063,
+  "n_unparseable": 3,
+  "n_contradictory_full_marks_with_ebi": 5,
+  "contradictory_rate": 0.10638297872340426,
+  "failures_sample": [
+    {
+      "gold": {
+        "marks_awarded": 1,
+        "www": [],
+        "ebi": [],
+        "misconception_tags": []
+      },
+      "raw": "```json\n{\n  \"marks_awarded\": 1,\n  \"www\": [\"you correctly identified 'virus' as the type of pathogen causing measles\"],\n  \"ebi\": [\n    \"Explain briefly why measles is caused by a virus (e.g., 'Measles is a viral infection, transmitted via respiratory droplets, leading to symptoms like fever and rash'),\"\n    \"Include a reference to the mode of transmission (e.g., 'airborne spread') if the mark scheme allows for extra detail in a 1-mark answer\"\n  ],\n  \"misconception_tags\": []\n}\n```"
+    },
+    {
+      "gold": {
+        "marks_awarded": 0,
+        "www": [],
+        "ebi": [
+          "(transfer of) droplets / saliva / mucus",
+          "sneezes",
+          "coughs"
+        ],
+        "misconception_tags": []
+      },
+      "raw": "```json\n{\n  \"marks_awarded\": 1,\n  \"www\": [\"through the air\" (implicitly refers to \"droplets/saliva/mucus\" in the mark scheme)],\n  \"ebi\": [\n    \"Specify which airborne method from the mark scheme (e.g., 'droplets', 'sneezes', or 'coughs')\u2014even if phrased as 'through the air', add a concrete example like 'droplets from coughing' to match the mark scheme exactly.\",\n    \"Clarify that this is a *direct* transmission method (e.g., 'via respiratory droplets') to avoid ambiguity about indirect spread (e.g., contaminated surfaces).\"\n  ],\n  \"misconception_tags\": []\n}\n```"
+    },
+    {
+      "gold": {
+        "marks_awarded": 0,
+        "www": [],
+        "ebi": [
+          "Note that at 30 \u00b0C iodine solution remains yellow-brown because starch is not present",
+          "State that at 30 \u00b0C amylase or the enzyme broke the starch down",
+          "State that at 90 \u00b0C iodine solution turns blue-black because starch was still present",
+          "Explain that at 90 \u00b0C the amylase or enzyme has denatured (rather than being 'killed')"
+        ],
+        "misconception_tags": []
+      },
+      "raw": "```json\n{\n  \"marks_awarded\": 1,\n  \"www\": [\n    \"enzyme works best\"\n  ],\n  \"ebi\": [\n    \"(30 \u00b0C) iodine solution remains yellow-brown because starch is not present\",\n    \"(because) amylase / enzyme broke starch down\",\n    \"(90 \u00b0C) iodine solution turns blue-black because starch was still present\",\n    \"(because) the amylase / enzyme has denatured\",\n    \"iodine turns blue-black\" (replaces incorrect phrasing in student's answer),\n    \"high heat kills the enzyme\" (replaces vague phrasing)\n  ],\n  \"misconception_tags\": [\n    \"incorrect iodine colour interpretation at 30 \u00b0C\",\n    \"incorrect implication that starch is produced at 30 \u00b0C\"\n  ]\n}\n```"
+    }
+  ]
+}

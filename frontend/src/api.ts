@@ -18,6 +18,11 @@ api.interceptors.response.use(
 );
 
 export function extractErrorMessage(err: any, fallback: string): string {
+  // Overrides every caller's own fallback/backend detail uniformly, rather
+  // than relying on each call site to special-case 429 itself.
+  if (err?.response?.status === 429) {
+    return "You're going a bit fast - give it a moment and try again.";
+  }
   const detail = err?.response?.data?.detail;
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {

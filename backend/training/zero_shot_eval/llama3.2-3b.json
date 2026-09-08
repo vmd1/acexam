@@ -1,0 +1,18 @@
+{
+  "spec_slug": "aqa-gcse-biology-higher",
+  "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  "adapter_path": null,
+  "n_test": 50,
+  "held_out_total": 94,
+  "sampled": true,
+  "n_json_parsed": 50,
+  "json_parse_rate": 1.0,
+  "marks_awarded_exact_match_rate": 0.72,
+  "www_overlap_f1_mean": 0.5458235107190893,
+  "ebi_overlap_f1_mean": 0.4365642829486408,
+  "misconception_tags_overlap_f1_mean": 0.98,
+  "n_unparseable": 0,
+  "n_contradictory_full_marks_with_ebi": 8,
+  "contradictory_rate": 0.16,
+  "failures_sample": []
+}

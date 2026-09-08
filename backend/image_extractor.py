@@ -1,12 +1,8 @@
 import fitz  # PyMuPDF
-import os
 import hashlib
 import io
 from PIL import Image, ImageStat
 from typing import List, Dict, Any, Tuple
-
-MEDIA_DIR = os.path.join(os.path.dirname(__file__), "media")
-os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # Hard cap on images extracted per paper - a safety net against runaway
 # vision-API cost if the heuristic below still over-triggers on an unusual
@@ -135,6 +131,15 @@ def extract_all_visuals_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     1. PyMuPDF embedded raster image extraction (get_images())
     2. Vector drawings fallback: Detects vector drawings (paths, curves, rects)
        and rasterizes the page bounding box at 300 DPI (3x resolution).
+
+    Returns each image's raw bytes under "_bytes" rather than writing
+    anything to local disk - this function is sync/CPU-bound (PyMuPDF), so
+    it stays that way, but the actual object-storage upload is an async
+    network call; the caller (ingestion.py, which does run inside an event
+    loop) uploads each "_bytes" payload to S3/MinIO via storage.py and
+    replaces it with a real "url" before anything here is persisted. "key"
+    is the content-addressed object key (checksum-based, matching the old
+    local filename) the caller uploads under.
     """
     extracted_images = []
     seen_hashes = set()
@@ -161,19 +166,14 @@ def extract_all_visuals_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                 if checksum in seen_hashes:
                     continue
                 seen_hashes.add(checksum)
-                
-                # Save locally
-                file_name = f"{checksum}.{ext}"
-                file_path = os.path.join(MEDIA_DIR, file_name)
-                with open(file_path, "wb") as f:
-                    f.write(image_bytes)
-                    
+
                 extracted_images.append({
                     "page": page_num + 1,
                     "type": "raster",
                     "ext": ext,
                     "checksum": checksum,
-                    "url": f"/api/media/{file_name}",
+                    "key": f"{checksum}.{ext}",
+                    "_bytes": image_bytes,
                     "is_valid": valid,
                     "validation_reason": reason,
                     "needs_review": not valid,
@@ -195,17 +195,14 @@ def extract_all_visuals_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                 if checksum in seen_hashes:
                     continue
                 seen_hashes.add(checksum)
-                file_name = f"{checksum}.png"
-                file_path = os.path.join(MEDIA_DIR, file_name)
-                with open(file_path, "wb") as f:
-                    f.write(vec_bytes)
 
                 extracted_images.append({
                     "page": page_num + 1,
                     "type": "vector_rasterized",
                     "ext": "png",
                     "checksum": checksum,
-                    "url": f"/api/media/{file_name}",
+                    "key": f"{checksum}.png",
+                    "_bytes": vec_bytes,
                     "is_valid": valid,
                     "validation_reason": reason,
                     "needs_review": not valid,

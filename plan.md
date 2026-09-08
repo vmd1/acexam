@@ -20,12 +20,11 @@ Acexam combines the best elements of top competitors — matching Revise2 on ada
 |---|---|---|---|
 | Cost | Entirely free | Subscription paywall | **100% Free for everyone**. Self-hosted 1.5B–3B models eliminate token billing. Zero paywalls, zero energy meters. |
 | Response Speed | Standard API (~2–5s) | Standard API (~2–5s) | **Near-instant (<300ms)**: Lightweight fine-tuned models + vLLM prefix caching stream feedback almost instantly. |
-| Exam Canvas UI | Standard Web Form | Paper-like Canvas workspace | **Authentic Exam Paper Canvas (§3.8)**: Renders questions in true board layout with lined text zones, HTML5 pen/stylus drawing canvas, instant OCR, and inline tick/cross visual annotations. |
+| Exam Canvas UI | Standard Web Form | Paper-like Canvas workspace | **Authentic Exam Paper Canvas (§3.8)**: Renders questions in true board layout with lined text zones, HTML5 pen/stylus drawing canvas for working-out, and inline tick/cross visual annotations. |
 | Personalization | Topic weakness scores | Practice queues | **Misconception Memory (§3.7)**: Tracks specific recurring mistakes per student per spec over time, automatically targeting practice to fixed misconceptions. |
 | Question Freshness | Generated on demand | Static past papers | **Verified Variants (§3.6)**: Generates fresh question variants derived from verified bank mark schemes without sacrificing accuracy. |
-| Photo / Image Marking | Handwritten OCR | Built-in canvas inking | **Dual Path (§3.4 & §3.8)**: In-app digital pen canvas OR uploaded photo OCR, routed through the same ultra-fast marking engine. |
 
-The core build pillars are **authentic exam-paper canvas UI**, **image/ink marking**, **ultra-fast lightweight spec-code models**, and **persistent misconception memory**.
+The core build pillars are **authentic exam-paper canvas UI**, **ultra-fast lightweight spec-code models**, and **persistent misconception memory**.
 
 ---
 
@@ -65,8 +64,7 @@ The central cost- and quality-control insight: expensive AI work happens once, a
 5. **Shared images across sub-questions**: A diagram in the stem of a question (e.g. above "3(a)") is often required for sub-questions "3(b)(i)" and "3(b)(ii)". The assignment step detects images whose bounding box sits above a shared stem (before the first sub-question boundary) and links them to all sub-questions under that stem.
 6. **Image validation & storage guarantees (fail-loud design)**:
    - *Sanity check*: Every extracted image undergoes a cheap automated check for minimum dimensions and non-uniform color (detecting empty crops). Fails check OR boundary detection flagged a diagram but extraction yielded nothing usable → question is auto-flagged `needs_review` and blocked from auto-publishing.
-   - *Permanent source*: Original source PDFs are retained permanently (`papers.source_pdf_url`) so images can be re-cropped if a bug is discovered later.
-   - *Integrity*: Uploaded to Cloudflare R2 with content-addressed keys (byte hash). The SHA-256 checksum is stored in `questions.images` JSONB alongside URL, bounding box, and text description to detect corruption on read.
+   - *Current implementation vs. target design*: Extracted images and the original source PDF are both uploaded to S3-compatible object storage (`storage.py`, checksum-keyed) — MinIO locally via `docker-compose.yml`'s `minio`/`minio-init` services, routed through Traefik at `s3.acexam.localhost`; swap `S3_ENDPOINT_URL`/`S3_PUBLIC_URL`/credentials for a real S3/R2 endpoint in prod, no code change needed. `papers.source_pdf_url` is now a real stored artifact (`routers/ingestion.py` uploads the original PDF bytes before inserting the paper row), so re-cropping from the original file is possible. The backend container needs no local media volume any more (`image_extractor.py` returns raw bytes instead of writing to disk).
 7. Each question is classified by mark value.
 8. Specification-point references printed in mark schemes (e.g. "4.2.1 Cell division") are parsed directly — no AI needed for topic categorisation.
 9. **Admin review UI**: Displays the original PDF page with detected bounding boxes overlaid next to cropped results, enabling single-action re-cropping or re-assignment.
@@ -124,12 +122,6 @@ Rather than maintaining a basic topic score, Acexam constructs a multi-dimension
 
 Students can assemble custom mock papers filtered by subject, board, topic, and mark range. By default, the paper generator consults the student's **Master Profile (§3.2)** to automatically balance topic distribution and question difficulty toward their specific grade-boundary gaps. Papers are assembled from the ingested question bank wherever possible (fast, free, accurate); AI is invoked only for "free-form" requests not covered by the bank.
 
-### 3.4 Photo-based answer capture & marking
-
-Students can photograph or upload an image of a handwritten answer instead of typing it. OCR extracts the text from the image, which then flows through the *existing* marking pipeline unchanged — deterministic DSL for 1–2 mark answers where the extracted text permits it, AI marking for 3+ mark answers. This reuses the marking infrastructure rather than building a parallel path, so it inherits the same mark-scheme accuracy as typed answers.
-
-**Explicit Scope Boundary**: This feature covers marking typed or handwritten text answers submitted via photos (questions that reference diagrams in the paper stem are supported via §3.1a image descriptions). It **does not cover** marking a student's own hand-drawn diagram as their answer (e.g. "sketch the graph of velocity against time") — that is a genuinely harder vision problem on the answer side and is explicitly out of scope for v1.
-
 ### 3.5 Adaptive practice queue (Profile-Driven)
 
 Opening "Practice" launches an automated revision session assembled directly by the **Master Profile Engine (§3.2)**. Sessions dynamically interleave:
@@ -153,20 +145,16 @@ This component of the **Master Profile (§3.2)** tracks specific conceptual erro
 
 ### 3.8 Interactive Exam Paper Canvas UI
 
-Inspired by Medly.ai's canvas workspace, Acexam presents questions inside an authentic **Exam Paper Canvas UI** designed to replicate the look and feel of real exam board question papers (AQA, Edexcel, OCR) while providing digital inking and instant visual marking feedback.
+Inspired by Medly.ai's canvas workspace, Acexam presents questions inside an authentic **Exam Paper Canvas UI** designed to replicate the look and feel of real exam board question papers (AQA, Edexcel, OCR) while providing digital inking for working-out and instant visual marking feedback on typed answers.
 
 1. **Authentic Paper Styling & Layout**:
    - Renders questions in true exam-board typography (official serif/sans-serif fonts, bold question identifiers like `3(b)(ii)`, mark indicators `[3 marks]`, and embedded vector/raster diagrams).
    - Lined answer zones with line counts matched to the mark value.
 2. **Dual-Mode Input Workspace (Typed & Drawn)**:
-   - **Typed Response**: Direct keyboard entry into lined text fields.
-   - **HTML5 Canvas / SVG Overlay**: A vector drawing overlay powered by a client-side drawing engine (e.g., Fabric.js / Perfect Freehand).
+   - **Typed Response**: Direct keyboard entry into lined text fields. This is the only mode that is marked — the source of truth for every scored answer.
+   - **HTML5 Canvas / SVG Overlay**: A vector drawing overlay powered by a client-side drawing engine (e.g., Fabric.js / Perfect Freehand), for sketching graphs, working out, balancing equations, or annotating diagrams directly on the paper. **Not marked** — no OCR/handwriting-to-text step exists or is planned; ink is a visual scratch space stored alongside the answer for the student's own reference, not scored input.
    - **Canvas Tools**: Pen (with thickness/color controls & stylus pressure sensitivity), Highlighter, Eraser, Clear, Undo/Redo, Zoom, and Pan.
-   - Enables students to sketch graphs, write out mathematical working, balance equations, or annotate diagrams directly on the paper.
-3. **Instant Canvas OCR Submission**:
-   - Inked strokes are rendered to image bytes client-side upon clicking "Submit".
-   - Handwriting is extracted via OCR (§3.4) and marked by the self-hosted ultra-lightweight model (§6) in **<300ms**.
-4. **Inline Visual Feedback & Annotations**:
+3. **Inline Visual Feedback & Annotations**:
    - Marking results are overlaid **directly onto the paper canvas**:
      - **Green Ticks ($\checkmark$)** and **Red Crosses ($\times$)** rendered alongside student answer lines.
      - **Margin Popover Chips**: Clickable tags highlighting missed marking points or recognized misconceptions (§3.7) anchored to the exact line where the error occurred.
@@ -178,16 +166,15 @@ Inspired by Medly.ai's canvas workspace, Acexam presents questions inside an aut
 
 | Layer | Technology | Notes |
 |---|---|---|
-| Frontend | React | Talks to backend via `fetch()` / API client |
-| Backend | Python FastAPI | Async endpoints; routers: `/auth`, `/exams`, `/generate`, `/feedback`, `/analytics` |
-| Task queue | ARQ + Redis | Async paper ingestion and generation jobs |
-| Primary database | PostgreSQL | Users, papers, questions, attempts, answers, weakness_scores, misconception_taxonomy |
-| Cache / rate-limit | Redis | Session tokens, sliding-window rate limits (60 req/min) |
-| Object storage | Cloudflare R2 | Extracted question images (no egress fees) |
-| Auth | JWT + OAuth | Google login + email/password; JWT in httpOnly cookies |
-| Ingestion AI | Hosted API (abstracted) | Claude and/or Gemini for offline/admin work only: boundary edge cases, synthetic data & auto-grading (§6.2), and sampled auditing (§6.3). **Never in the path of a live student mark.** |
-| Model serving | Self-hosted vLLM engine | Serves promoted **per-spec-code LoRA adapters** on ultra-lightweight base models (1.5B–3B parameter class). Delivers **sub-300ms near-instant feedback** for all students. |
-| Model training | Offline LoRA fine-tuning pipeline | Ephemeral batch jobs; pre-trains checkpoints per spec code directly from ingestion-sourced mark schemes, exemplar answers, and examiner reports (§6.2). |
+| Frontend | React 19 + TypeScript + Vite | Single-page app talking to the backend via a relative `/api/...` axios client (`api.ts`, `withCredentials: true`), proxied to the backend by the Vite dev server. See §4.2 for the app-shell/routing structure, which has grown well beyond a single `App.tsx`. |
+| Backend | Python FastAPI | Async endpoints, `asyncpg` pool + Redis client set up once via lifespan (both fail soft to `None` if unreachable). Routers mounted in `main.py`: `/api/auth`, `/api/exams`, `/api/generate`, `/api/feedback`, `/api/analytics`, `/api/admin/ingestion`, `/api/admin/qualifications` (admin-only, §4.3), and `/internal` (not under `/api` — a Traefik-only route, §4.4). No ARQ or other task-queue framework is in use — paper ingestion runs synchronously inside the `POST /admin/ingestion/upload` request/response cycle, not as a background job. |
+| Primary database | PostgreSQL | `users`, `spec_topics`, `qualifications`, `misconception_taxonomy`, `papers`, `questions`, `attempts`, `attempt_questions`, `answers`, `student_topic_mastery`, `student_command_word_mastery`, `student_misconceptions`, `question_variants`, `training_examples`, `training_jobs`, `spec_code_marking_models` — see §7.1 for the schema's evolution beyond the original illustrative design. No migration framework; raw numbered `schema_phaseN.sql` files applied in order by `migrate.py` (currently phases 1–21). |
+| Cache / rate-limit / job queue | Redis | Sliding-window rate limits (60 req/min, fails open if Redis is down), and — new since the original design — the primary transport for live AI marking requests: the backend `RPUSH`s a job onto `mlx:marking:queue` and `BLPOP`s the matching `mlx:marking:result:<id>` key, with the self-hosted training/serving agent (§6.5) on the other end. Not used for paper ingestion, which is synchronous. |
+| Object storage | S3-compatible (`storage.py`) — MinIO locally (`docker-compose.yml`'s `minio`/`minio-init`, routed through Traefik at `s3.acexam.localhost`), swap for real S3/R2 in prod via env vars | Extracted question images and the original source PDFs are both uploaded, checksum-keyed, no local disk/volume involved (`papers.source_pdf_url` is a real upload, not a placeholder) — see §3.1 note. |
+| Auth | JWT in httpOnly cookies + email/password | `Google OAuth` (`/auth/google`, `/auth/google/callback`) remains an unimplemented stub, same as originally planned. |
+| Ingestion AI | Hosted API (Gemini and/or OpenAI-compatible, selected by which API key env var is set — `ai_pipeline.py::call_llm`) | Used only for offline/admin work: question-boundary splitting, image description generation, misconception taxonomy scanning, and synthetic training-answer generation/grading (§6.2). **Never in the path of a live student mark** — enforced in code, not just by convention (see §6.3). |
+| Model serving | Self-hosted **`mlx_lm.server`** processes, managed by a native Mac agent (§6.5) | Serves promoted **per-spec-code LoRA adapters** on 1.5B–3B-class base models (currently `Qwen2.5-3B-Instruct-4bit`) via unified-memory MLX inference on Apple Silicon, reached over the Redis job queue above. A secondary Traefik-based HTTP route (`docker-compose.yml`'s `traefik` service, polling `GET /internal/traefik-config` every 5s) exists as a legacy fallback path if the queue is unreachable, and a final deterministic keyword-overlap stub (`ai_pipeline.py::_local_ai_fallback_processor`) exists if both fail — neither ever calls a hosted API. |
+| Model training | Offline LoRA fine-tuning pipeline, `backend/training/` (native Mac process, MLX, own `requirements.txt` kept separate from the backend's since `mlx-lm` is Metal-only) | **Implemented and actively used**, not aspirational — `agent.py` runs a training-job loop, an auto-train/auto-retrain loop keyed off `training_examples` counts and age, and the serving pool above, gated end-to-end by `spec_code_marking_models.status` (`none → training → gated → live`, §6.3/§6.4). Currently bootstrapped for one qualification (AQA GCSE Biology Higher) with real trained adapters and eval metrics on disk. |
 
 ### 4.1 Rate limiting & concurrency protection
 
@@ -196,6 +183,26 @@ With zero paywalls and 100% free access for all students, system protection focu
 - **Sliding-window rate limits**: Enforced via Redis (`rate_limit:{user_id}`) at 60 requests/minute to prevent automated scraping or denial-of-service botting.
 - **Near-instant inference queueing**: Because 1.5B–3B parameter models process tokens at >1,000 tokens/sec, request queues clear almost instantaneously without needing complex priority tiering.
 - **No token metering or payment ledgers**: Billed per GPU-hour as a low fixed infrastructure cost, with no per-user payments or token ledgers required.
+
+### 4.2 Frontend app shell
+
+`main.tsx` no longer renders the app directly — it branches on a `VITE_HOMEPAGE_ONLY` build-time env var:
+- **`true`** (`npm run dev:homepage` / `build:homepage`) → renders `HomepageOnlyShell`, which is just `Landing.tsx` plus a "coming soon" banner, with zero backend calls and zero route guards. This is a static-marketing-only build target, separate from the product build.
+- **default** → lazy-loads `FullApp.tsx`, which wraps `AuthProvider` around the real `App.tsx` router — the product described throughout this document.
+
+Within `App.tsx`, the shell itself now branches on auth state: logged-out visitors get a `TopBar` (brand + hamburger → `NavDrawer`, marketing links + theme toggle) and see `Landing.tsx` at `/`; logged-in users get the collapsible desktop `Sidebar` (+ a mobile `BottomTabBar`) with Practice / History / (admin) Manage Subjects navigation. `NavDrawer` and `Sidebar` are two distinct components for two distinct states, not a replacement of one by the other.
+
+Student-facing routes have grown beyond the original single practice flow: `/app` (`PracticeSetup`), `/app/history` (`AttemptHistory` — cross-subject history of saved custom papers and exam-question sessions, reopening into `PracticeSession` in a review mode, backed by the `attempts`/`attempt_questions` tables added in §7.1), `/app/subject/:subjectKey` (`SubjectPractice`, a per-subject hub), `/app/subject/:subjectKey/exam-questions` (`ExamQuestionsSetup`, an "endless exam questions" adaptive mode with a `TopicPicker` for random/weak/manual topic selection), `/app/subject/:subjectKey/past-papers` (`CustomPapers`), and `/app/subject/:subjectKey/analytics`.
+
+### 4.3 Admin app: reorganized per-subject (replaces the original flat ingestion/review split)
+
+`AdminIngestion.tsx` and `AdminReview.tsx` (the originally planned flat "upload papers" / "review & publish" pages) have been deleted and replaced by a per-qualification structure:
+- **`AdminManageSubjects.tsx`** (`/admin/subjects`) — list of qualifications with paper counts, tiers, and custom-paper config; an add-subject modal that uploads a spec PDF.
+- **`AdminSubjectDetail.tsx`** (`/admin/subjects/:id`) — the hub for one qualification, composing `SubjectUploadForm` (bulk question-paper/mark-scheme/examiner-report upload rows, per tier), `SubjectPapersReview` (papers list, ingestion token-usage display, review/publish/delete), `SubjectMisconceptions` (taxonomy approval scoped to that qualification), and the §6.3/§6.4 marking-model rollout console (train/gate/promote-to-live controls, training-job log polling) plus tier and custom-paper-settings editing.
+
+### 4.4 Internal routing for self-hosted marking (Traefik)
+
+`docker-compose.yml` adds a `traefik` service that polls the backend's `GET /internal/traefik-config` endpoint (`routers/internal.py`, gated by a shared-secret header rather than user auth) every 5 seconds, and dynamically builds a route per **live** `spec_code_marking_models` row to that spec code's `mlx_lm.server` process on the host Mac (`host.docker.internal:<serving_port>`). This exists purely as a fallback for `ai_pipeline.py::mark_with_selfhosted_model` if the primary Redis-queue path (§4, §6.5) is unreachable — the queue needs no extra networking setup since the training agent watches the same Redis instance the backend already uses.
 
 ---
 
@@ -250,6 +257,8 @@ So taxonomy generation is its own dedicated step, sitting right after a spec cod
 
 ### 6.3 Rollout gating — no spec code goes live untested
 
+**Implementation status**: this section is no longer purely a design — it is live and enforced in code. The `spec_code_marking_models` table (keyed by `exam_board, level, subject, tier`) holds a `status` column (`none` / `training` / `gated` / `live`) that `marking_engine.mark_question` checks before ever calling the self-hosted model; any status other than `live` returns `marked_by: "pending_model"` with a manual-review message, never a guess and never a hosted-API fallback. The only way a spec code reaches `live` is an explicit admin action (`PUT /admin/qualifications/marking-models`) in the `AdminSubjectDetail` rollout console (§4.3) — an evaluation clearing the bar auto-triggers training but does **not** auto-promote to live.
+
 Given how much trust the product's differentiation depends on ("mark-scheme-accurate marking"), a bad fine-tune is a trust-destroying bug, not a cosmetic one. Because there's no hosted API in the live path to compare against, gating leans on the automated pipeline above pre-launch and on sampled, asynchronous auditing during a spec code's early live period — not on a human reviewing every mark, and not on a shadow-mode comparison against another live AI marker:
 
 1. **Pre-training** — fine-tune (LoRA-style, on an open-weight base model) using that spec code's ingestion-sourced and synthetic-plus-cross-checked training data (§6.2). Happens as soon as a spec code has enough seed coverage — can run well ahead of Phase 4, during ingestion itself.
@@ -261,6 +270,8 @@ Given how much trust the product's differentiation depends on ("mark-scheme-accu
 ### 6.4 Interim and steady state
 
 A spec code has no AI marking at all until it passes stage 2 above — there is no default "everyone starts on X" marker to fall back to, since the whole point is removing any hosted-API dependency from the marking path. In practice this means the initial spec-code coverage for Phase 4 launch should be chosen deliberately (the highest-ingestion-volume, most-requested specs first), and rollout is staged per spec code rather than a single cutover date. A spec code with sustained low ingestion volume may simply sit in "DSL-only" (1–2 mark questions available, 3+ mark AI marking not yet offered) indefinitely, rather than degrading to a lower-trust hosted-API path — this is a deliberate trade of coverage breadth for the "never calls a hosted API for marking" guarantee.
+
+**Current coverage**: as of this writing, exactly one qualification — AQA GCSE Biology Higher — has cleared training and evaluation and has real adapter checkpoints on disk; it is the only spec code that has been through the full pipeline end-to-end. Every other ingested qualification remains DSL-only for 3+ mark questions until its own `training_examples` volume clears the auto-train threshold (§6.5) and an admin promotes it.
 
 ### 6.5 Training pipeline mechanics
 
@@ -279,13 +290,13 @@ Stored as JSONL per spec code. Split for held-out evaluation **by paper series, 
 
 **Base model and method.** An ultra-lightweight open-weight instruction-tuned model in the **1.5B–3B parameter range** (e.g. Qwen2.5-1.5B / 3B or Llama 3.2 3B) is used as the shared base model. Because exam marking is a constrained pattern-matching task against a explicit mark scheme, a 1.5B–3B base model fine-tuned on spec-code data achieves high marking precision while generating tokens at >1,000 tokens/sec for near-instant <300ms feedback. Fine-tuning uses LoRA on a quantized base, on a single machine's accelerator (no networked/rented GPU required at this parameter range). Typical settings: LoRA rank 16–32, alpha = 2× rank, dropout 0.05.
 
-**Tooling — Apple Silicon (current dev setup).** Training and serving run locally on an Apple Silicon Mac (M4, 24GB unified memory) via **MLX** (`mlx-lm`), not the CUDA-oriented stack the rest of this section originally assumed — Axolotl/Unsloth/`bitsandbytes`-style QLoRA and vLLM all require CUDA and don't run on Apple GPUs. `mlx_lm.lora` fine-tunes a 4-bit-quantized base model with LoRA adapters directly on the M-series GPU via unified memory (no separate host/device transfer, and no need to rent an A100/4090 — 24GB comfortably holds a 3B model, its LoRA adapter, and training activations). `mlx_lm.server` (or `mlx_lm.generate` for offline eval) serves the fine-tuned model. Structured output is still enforced at inference time via JSON-mode/grammar-constrained decoding, either through `mlx-lm`'s own logits-processor hooks or a JSON-schema-validating wrapper around generation, so the model can't drift outside the JSON schema even on an imperfect fine-tune.
+**Tooling — Apple Silicon (implemented).** Training and serving run natively on a host Apple Silicon Mac (M4, 24GB unified memory) via **MLX** (`mlx-lm`), not the CUDA-oriented stack the rest of this section originally assumed — Axolotl/Unsloth/`bitsandbytes`-style QLoRA and vLLM all require CUDA and don't run on Apple GPUs. This isn't just a substitution on paper: `backend/training/` is a real, working pipeline (`assemble_dataset.py` → `train_lora.py` → `evaluate.py` → `measure_latency.py`) with its own `requirements.txt` (`mlx-lm`, `asyncpg`, `httpx`, `redis`, `python-dotenv`, `pyyaml`) kept deliberately separate from the backend's Linux-container `requirements.txt`, since it must run on the host machine's GPU rather than inside Docker. `mlx_lm.lora` fine-tunes a 4-bit-quantized base model with LoRA adapters directly on the M-series GPU via unified memory. `mlx_lm.server` serves the fine-tuned model, driven entirely by Redis job messages (no HTTP between the agent and the backend at all — see below). Structured output is enforced at inference time via JSON-mode/grammar-constrained decoding so the model can't drift outside the JSON schema even on an imperfect fine-tune.
 
-**Known gap vs. the vLLM plan below: no built-in multi-adapter serving.** vLLM can hot-load dozens of LoRA adapters onto one resident base model and route each request to the right one by spec code; `mlx-lm` has no equivalent today — it serves one (optionally adapter-fused) model per running process. Two workable options once several spec codes are live: (a) fuse each spec code's adapter into its own small quantized model file and switch which one is loaded based on the request's spec code (fine for a single-user/dev deployment, adds a model-swap latency cost under concurrent multi-spec-code traffic), or (b) run one `mlx_lm.server` process per active spec-code adapter behind a thin router that dispatches by spec code (higher memory floor, no swap latency). Revisit this once ingestion coverage spans more than a couple of spec codes — it isn't a blocker for training and evaluating the first adapter.
+**Orchestration — `backend/training/agent.py` (implemented, replaces the vLLM multi-adapter plan below).** A single long-running process on the host Mac runs four concurrent loops: (1) a **training-job loop** that drains the `training_jobs` table (queued → assembling → training → evaluating → done/failed) and runs the assemble/train/evaluate scripts in sequence; (2) an **auto-train/auto-retrain loop** that enqueues training automatically once a spec code clears a minimum accepted-`training_examples` threshold (default 50), or once it accumulates enough new examples (default 200) or enough elapsed time (default 30 days) since its last run; (3) a **queue-worker loop** that resolves the "no built-in multi-adapter serving" gap the original vLLM-oriented plan anticipated — rather than fusing adapters into separate model files or running one process per spec code, it maintains a dynamic, LRU-evicted pool of up to `MAX_CONCURRENT_SERVERS` (default 8) `mlx_lm.server` processes, loading a spec code's adapter on demand in response to `BLPOP`-consumed jobs off the shared Redis queue; and (4) a sweep/janitor loop. Communication with the FastAPI backend is entirely through Postgres (`training_jobs`, `spec_code_marking_models`) and Redis (`mlx:marking:queue` / `mlx:marking:result:<id>`) — never a direct HTTP call between the two processes, which is what lets the agent run natively on the host while the backend stays fully containerized.
 
 **Hyperparameters (starting point, tuned per spec code as needed).** LR ~1e-4–2e-4 for LoRA; 2–3 epochs — the task is narrow and repetitive (same JSON schema every time) so it converges fast, and more epochs risks overfitting to the synthetic generator's own quirks rather than learning real marking judgement; batch size driven by available unified memory, with gradient accumulation to an effective batch of ~16–32 (24GB is comfortable for a 1.5B–3B model at 4-bit, but leaves less headroom than a dedicated 24GB+ discrete GPU once the OS and other apps are running). Epochs/LR are the two worth actually sweeping per spec code, since a spec code with 200 examples needs different treatment than one with 5,000 — cheap to grid given how short each run is.
 
-**Evaluation loop.** After each candidate checkpoint: exact-match rate on `marks_awarded` against the held-out label, plus a looser overlap score for `missed_points`/`misconception_tags` (embedding similarity or keyword overlap, not exact string match, since tagging is more subjective than mark counting). Only checkpoints clearing the §6.3 stage-2 threshold become launch candidates. Every checkpoint's eval score is logged against a version ID, building the retrain history a spec code accumulates over time.
+**Evaluation loop.** After each candidate checkpoint: exact-match rate on `marks_awarded` against the held-out label, plus a looser overlap score for `missed_points`/`misconception_tags` (embedding similarity or keyword overlap, not exact string match, since tagging is more subjective than mark counting). Only checkpoints clearing the §6.3 stage-2 threshold become launch candidates. Every checkpoint's eval score is logged against a version ID, building the retrain history a spec code accumulates over time — `training/adapters/aqa-gcse-biology-higher/` currently holds 14 versioned runs, with the promoted checkpoint (base model `mlx-community/Qwen2.5-3B-Instruct-4bit`, rank-16 LoRA, 177 training examples) scoring a 0.80 exact-match rate on `marks_awarded` and a 0.837 mean overlap F1 on WWW/missed-points against its held-out set.
 
 **Versioning and serving.** Each spec code's LoRA adapter is version-tagged (e.g. `aqa-8462h-v3`), never overwritten in place, so a regression can be rolled back instantly. Production serving topology (single shared base model vs. per-adapter processes, as above) is a deployment decision out of this document's scope per its intro — what matters here is that each version-tagged adapter is what gets deployed, however serving ends up being hosted.
 
@@ -410,8 +421,8 @@ CREATE TABLE answers (
     question_id         UUID NOT NULL REFERENCES questions(id),
     user_id             UUID NOT NULL REFERENCES users(id),
     answer_text         TEXT,
-    answer_image_url    TEXT,                  -- set when the answer was submitted as a photo
-    ocr_text            TEXT,                  -- OCR output from answer_image_url, feeds the same marking pipeline as answer_text
+    answer_image_url    TEXT,                  -- canvas/ink snapshot (§3.8), stored for the student's own reference — not marked
+    ocr_text            TEXT,                  -- unused: OCR/photo-upload marking was scoped out, column kept for compatibility with the deployed schema
     marks_awarded       SMALLINT,
     marks_possible      SMALLINT NOT NULL,
     feedback_text       TEXT,                  -- populated for AI-marked answers
@@ -488,89 +499,108 @@ CREATE INDEX idx_question_variants_source ON question_variants (source_question_
 -- Only variants with validated = true are eligible for paper generation / practice queue serving.
 ```
 
+### 7.1 Schema evolution beyond the illustrative design (phases 8–21)
+
+The schema above is the original starting design (still roughly `schema.sql` through `schema_phase7.sql` as deployed). Real usage has since added 14 further numbered migration files (`schema_phase8.sql`–`schema_phase21.sql`, all applied in order by `migrate.py`), none of which are reflected in the SQL above. Rather than restate every file verbatim, the additions group into four themes:
+
+- **Qualifications become a first-class, admin-configurable entity** (phases 8, 12): a new `qualifications` table (`exam_board, level, subject, tiers TEXT[]`) is the canonical home for GCSE tier data (`papers.tier`, `user_subjects.tier` also added here) and for admin-configurable custom-paper settings (`custom_paper_target_marks`, `custom_paper_time_limit_minutes` — previously a hardcoded 20-mark paper). `spec_topics.tier_only` (phase 9) marks a topic as Higher- or Foundation-only within a merged GCSE spec document.
+- **Training data is now persisted and structured, not generated-and-discarded** (phases 10, 11, 13, 20): a new `training_examples` table stores every synthetic/exemplar candidate answer with its full structured grading label (`feedback_text`, `missed_points`, `misconception_tags`, and — phase 20 — `www` for "what went well"), tagged by `source` (`'synthetic'` vs `'examiner_exemplar'`, phase 13) so real examiner-report exemplars and AI-generated candidates aren't conflated.
+- **The self-hosted marking rollout described in §6.3–§6.5 has a real schema backing it** (phases 15–18): `spec_code_marking_models` (keyed by `exam_board, level, subject, tier`) holds the `none → training → gated → live` status machine, the active adapter version, eval results, and (phase 16) a legacy `serving_port` for Traefik routing; `training_jobs` (phase 17, with phase 18's `accepted_examples_at_request` anchor) is the request queue the native Mac training agent (§6.5) drains.
+- **Sessions became durable, resumable records** (phase 19, plus phase 21's `answers.www`): `attempts` gained `mode` (`adaptive`/`exam_questions`/`custom`), a title, and subject/board/level/time-limit/total-marks metadata, alongside a new `attempt_questions` table (`attempt_id, question_id, position`) that freezes the exact question set for a saved session or generated paper. This is what powers the `AttemptHistory` view (§4.2) — a session can be reopened and reviewed rather than only ever answered once and forgotten. `papers.ingestion_token_usage` (phase 14) similarly persists per-paper ingestion cost for the admin review UI.
+
 ---
 
 ## 8. Multi-Stage Build Roadmap
 
 The build is sequenced so every stage ships a usable increment, with the highest-leverage cost-saving feature (ingestion) built before the highest-cost feature (live AI marking).
 
-### Phase 1 — Foundation
+> **Status note**: Phases 1–4 below are complete for their core scope and are left checked off as a historical record of what shipped; sub-items called out as gaps (object storage, Google OAuth, multi-spec-code AI marking coverage) remain genuinely open. Phase 5 is partially done. Phase 6 is new — it captures real product work that happened outside this document's original scope and needs folding back in.
+
+### Phase 1 — Foundation ✅
 *Goal: a working application skeleton the rest of the product can be built on.*
 
-- [ ] FastAPI skeleton with routers stubbed out (`/auth`, `/exams`, `/generate`, `/feedback`, `/analytics`)
-- [ ] Postgres schema: `users`, `spec_topics`
-- [ ] Redis wired up for sessions and rate-limit keys
-- [ ] React frontend shell with routing and API client
-- [ ] Auth flow: email/password + Google OAuth, JWT in httpOnly cookies
+- [x] FastAPI skeleton with routers (`/auth`, `/exams`, `/generate`, `/feedback`, `/analytics`, plus `/admin/ingestion`, `/admin/qualifications`, and the internal Traefik-config route — more than originally scoped, see §4)
+- [x] Postgres schema: `users`, `spec_topics`
+- [x] Redis wired up for rate-limit keys (and, since Phase 4, as the live-marking job queue transport)
+- [x] React frontend shell with routing and API client
+- [x] Auth flow: email/password, JWT in httpOnly cookies — **Google OAuth remains an unimplemented stub** (`/auth/google`, `/auth/google/callback`), not yet built
 
-### Phase 2 — Ingestion Pipeline
+### Phase 2 — Ingestion Pipeline ✅
 *Goal: turn a raw past-paper PDF into structured, markable questions.*
 
-- [ ] Postgres schema: `papers`, `questions`, `misconception_taxonomy`
-- [ ] PDF upload flow for admins
-- [ ] PyMuPDF dual image extraction: embedded raster (`get_images()`) + 2–4x page-region rasterisation fallback for vector paths
-- [ ] Image sanity validation (dimensions + non-blank color check) → auto-flag `needs_review` on failure
-- [ ] pdfplumber table extraction
-- [ ] Question boundary detection (regex/heuristics, AI fallback for edge cases)
-- [ ] Stem image assignment shared across sub-questions (e.g. 3(a), 3(b)(i), 3(b)(ii))
-- [ ] Dual independent image-description generation via hosted vision API (§3.1a), with disagreement routing to admin review
-- [ ] Upload extracted images to object storage (Cloudflare R2) with content-addressed keys and checksum verification
-- [ ] Spec-point parsing from mark schemes → populate `spec_topics` links
-- [ ] Deterministic DSL generation for 1–2 mark questions
-- [ ] Examiner report ingestion & initial misconception tag proposal (§6.2a)
-- [ ] Admin review UI displaying PDF page bounding-box overlays next to cropped image results for 1-action re-cropping/re-assignment
+- [x] Postgres schema: `papers`, `questions`, `misconception_taxonomy`
+- [x] PDF upload flow for admins (now organized per-subject, see Phase 6)
+- [x] PyMuPDF dual image extraction: embedded raster (`get_images()`) + rasterisation fallback for vector paths
+- [x] Image sanity validation (dimensions + non-blank color check) → auto-flag `needs_review` on failure
+- [x] pdfplumber table extraction
+- [x] Question boundary detection — implemented as AI-first (joint splitting via `ai_pipeline.py::split_paper_into_questions`), with the regex/heuristic detector as the fallback if the AI call fails, which is the inverse of this phase's original "regex first, AI only for edge cases" plan
+- [x] Stem image assignment shared across sub-questions (e.g. 3(a), 3(b)(i), 3(b)(ii)), including per-question shallow-copied captions so siblings don't clobber each other's figure labels
+- [x] Image description generation via hosted vision API (§3.1a)
+- [x] Object storage — S3-compatible (`storage.py`), checksum-keyed; MinIO locally via `docker-compose.yml`, real S3/R2 in prod via env vars. Both extracted images and original source PDFs are uploaded (`papers.source_pdf_url` is a real upload). Not the Cloudflare R2 provider specifically named in the original design, but the same S3-API contract, so swapping providers is a config change, not a code change. See §3.1 and §4.
+- [x] Spec-point parsing from mark schemes → populate `spec_topics` links
+- [x] Deterministic DSL generation for 1–2 mark questions (narrowed since ingestion: keyword-DSL is now reserved for numeric/select/multi_select/grid_select answer types; free-text "written" questions route to AI marking even at 1–2 marks — see `migrate_written_to_ai_marking.py`)
+- [x] Examiner report ingestion & initial misconception tag proposal (§6.2a)
+- [x] Admin review UI (now the per-subject `AdminSubjectDetail` console — see Phase 6 — rather than a flat review queue)
 
-> Note: as soon as a spec code has meaningful ingested coverage here, its per-spec-code marking model (§6) can start pre-training in parallel — it doesn't need to wait for Phase 4. Treat model pre-training as a parallel track fed by this phase's output, not a strictly later phase.
+> Note: as soon as a spec code has meaningful ingested coverage here, its per-spec-code marking model (§6) can start pre-training in parallel — realized in practice: the training pipeline (Phase 4) is fully implemented and independent of student-facing rollout.
 
-### Phase 3 — Student Product Core
+### Phase 3 — Student Product Core ✅
 *Goal: students can browse, answer, and get instant feedback on an authentic exam-paper canvas workspace powered by the Master Profile Engine.*
 
-- [ ] Postgres schema: `attempts`, `answers`, `student_topic_mastery`, `student_command_word_mastery`, `student_misconceptions`
-- [ ] **Master Student Profile Engine (§3.2)**: Real-time EWMA topic mastery calculation, Ebbinghaus memory decay curves, and command word competency matrix
-- [ ] Question browser with subject/board/topic filtering
-- [ ] **Exam Paper Canvas UI (§3.8)**: Authentic exam-board typography, question layout, and lined answer zones
-- [ ] **HTML5 Canvas / SVG Drawing Overlay**: Vector pen, highlighter, eraser, stylus pressure sensitivity, undo/redo, zoom/pan tools
-- [ ] Dual input handling (typed text + client-side ink rasterisation for OCR submission)
-- [ ] Deterministic DSL marking engine (zero AI cost path)
-- [ ] Inline visual marking annotations (ticks/crosses, margin misconception chips, mark scheme toggle)
-- [ ] Profile-driven adaptive practice queue (§3.5): session assembly dynamically interleaving active misconceptions, decaying topics, and weak command words
-- [ ] Visual Student Dashboard: Specification tree heatmap (Green/Amber/Red), active misconception hit list, and target grade trajectory projection
+- [x] Postgres schema: `attempts`, `answers`, `student_topic_mastery`, `student_command_word_mastery`, `student_misconceptions` (all since extended — see §7.1)
+- [x] **Master Student Profile Engine (§3.2)**: Real-time EWMA topic mastery calculation, Ebbinghaus memory decay curves, and command word competency matrix
+- [x] Question browser with subject/board/topic filtering
+- [x] **Exam Paper Canvas UI (§3.8)**: Authentic exam-board typography, question layout, and lined answer zones (`ExamCanvas.tsx`)
+- [x] **HTML5 Canvas / SVG Drawing Overlay**: pen, highlighter, eraser, undo/redo, zoom/pan
+- [x] Dual input handling (typed/MCQ/numeric/grid text is the only marked source of truth; canvas ink is an unmarked visual working-out layer, snapshotted at submit — no OCR)
+- [x] Deterministic DSL marking engine (zero AI cost path)
+- [x] Inline visual marking annotations (ticks/crosses, margin chips, mark scheme toggle)
+- [x] Profile-driven adaptive practice queue (§3.5), plus question-group expansion (`_expand_to_full_groups`) and mastery-based exclusion/previous-answer prefill that weren't explicitly called out in the original plan
+- [x] Visual Student Dashboard (`AnalyticsView`): topic hierarchy heatmap, active misconception list, GCSE 9-1 grade-boundary heuristic
 
-### Phase 4 — AI Marking Layer (Ultra-Fast & Free)
+### Phase 4 — AI Marking Layer (Ultra-Fast & Free) ✅ (implemented; coverage is narrow)
 *Goal: extend marking to free-response 3+ mark questions via self-hosted, ultra-lightweight (1.5B–3B) spec-code models with <300ms feedback latency.*
 
-**Training data pipeline (can start as soon as Phase 2 has coverage for a spec code — see note above):**
-- [ ] Misconception taxonomy review & approval (§6.2a): admin approves fixed `snake_case` tags per spec code *before* synthetic generation begins
-- [ ] Synthetic training-answer generation: hosted-API calls that write candidate answers targeting specific mark levels, conditioned on each ingested question's mark scheme and image descriptions (§3.1a)
-- [ ] Independent auto-grading: a separate hosted-API call marks each synthetic answer blind to its intended level, producing the structured label (marks, feedback, missed points, misconception tags from approved taxonomy)
-- [ ] Automatic cross-check: accept into the training set on agreement, discard/regenerate on disagreement — no per-example human step
-- [ ] Fixed-size (not volume-scaling) admin calibration-audit sample, to catch systematic grader drift
+**Training data pipeline:**
+- [x] Misconception taxonomy review & approval (§6.2a): admin approves fixed `snake_case` tags per spec code *before* synthetic generation begins
+- [x] Synthetic training-answer generation, persisted to `training_examples` rather than generated-and-discarded (schema phases 10, 13 — see §7.1)
+- [x] Independent auto-grading: a separate hosted-API call marks each synthetic answer blind to its intended level (replaced an earlier crude keyword-overlap cross-check, per recent commit history)
+- [x] Automatic cross-check: accept/reject into `training_examples` on agreement/disagreement
+- [x] Fixed-size admin calibration-audit sample (surfaced in the `AdminSubjectDetail` marking-model console)
 
 **Training infrastructure:**
-- [ ] Training-set assembly into JSONL instruction/response pairs, split by paper series for held-out evaluation (§6.5)
-- [ ] Offline LoRA fine-tuning pipeline via MLX (`mlx_lm.lora`) for 1.5B–3B parameter base models on Apple Silicon (M4, 24GB), producing versioned adapter checkpoints — see §6.5's Apple Silicon tooling note for why this replaces the CUDA-based Axolotl/Unsloth/vLLM stack the rest of §4–§5 still describes as the target architecture
-- [ ] Held-out evaluation harness (§6.3 stage 2 / §6.5) — exact-match on marks, overlap scoring on missed points/misconception tags; gates a spec code before it's eligible for live marking
-- [ ] Self-hosted inference service via `mlx-lm` serving (`mlx_lm.server`), with the multi-adapter-routing gap noted in §6.5 to be resolved once more than one or two spec codes are live
-- [ ] Async audit job (§6.3 stage 3): samples already-served live marks at a fixed rate, sends to a hosted API for an independent second opinion, queues disagreements for admin review, feeds results back into the next retrain
-- [ ] Scheduled/threshold-triggered retrain job per spec code (new audited-example count or monthly, whichever first), always regated through held-out eval before replacing the live adapter
+- [x] Training-set assembly into JSONL, split by paper series for held-out evaluation (`backend/training/assemble_dataset.py`)
+- [x] Offline LoRA fine-tuning pipeline via MLX (`train_lora.py`, `mlx_lm.lora`) on Apple Silicon (M4, 24GB) — this fully replaced the CUDA/Axolotl/Unsloth/vLLM stack this phase originally targeted; see §6.5
+- [x] Held-out evaluation harness (`evaluate.py`) gating a spec code before it's eligible for live marking, driven by `spec_code_marking_models`
+- [x] Self-hosted inference service via `mlx_lm.server`, with the multi-adapter-routing gap resolved by `training/agent.py`'s dynamic on-demand server pool (§6.5) rather than per-adapter model fusion
+- [ ] **Partially done**: async audit job (§6.3 stage 3) — the schema/queue plumbing for sampled re-grading exists conceptually in the design but there is no confirmed standalone scheduled job actively running fixed-rate live-mark audits; verify current state before relying on this for trust claims.
+- [x] Threshold/age-triggered auto-retrain per spec code (`training/agent.py`'s auto-train/auto-retrain loop — default thresholds: 50 examples to first-train, 200 new examples or 30 days to retrain), always regated through held-out eval; **promotion to `live` remains a manual admin action**, not automatic even after a passing eval
 
 **Live marking:**
-- [ ] Live marking call for 3+ mark questions, routed to that question's spec-code model → structured JSON (marks, feedback, missed points, misconception tags — §3.7)
-- [ ] Marking blocked (falls back to `needs_review`, no AI mark shown) for any spec code without a gated model — never routed to a hosted API
-- [ ] Missed marking points feed into the weakness tracker
-- [ ] Misconception tags feed the per-student mistake memory (§3.7)
-- [ ] Redis sliding-window rate limits (60 req/min) to prevent bot scraping (§4.1)
-- [ ] Photo upload flow for handwritten text answers (camera or file upload; student hand-drawn diagram marking explicitly out of scope for v1)
-- [ ] OCR extraction of answer text from the uploaded image (§3.4)
-- [ ] `answers` schema: `answer_image_url`, `ocr_text` columns
-- [ ] Route OCR output through the existing DSL/AI marking pipeline unchanged
+- [x] Live marking call for 3+ mark questions, routed via Redis job queue to that spec code's `mlx_lm.server` process → structured JSON (marks, feedback, missed points, misconception tags, plus `www`/"what went well" added since — §7.1)
+- [x] Marking blocked (`marked_by: "pending_model"`, manual review) for any spec code whose `spec_code_marking_models.status` isn't `live` — enforced in `marking_engine.py`, never routed to a hosted API
+- [x] Missed marking points feed into the weakness tracker
+- [x] Misconception tags feed the per-student mistake memory (§3.7)
+- [x] Redis sliding-window rate limits (60 req/min)
+- **Coverage**: only **AQA GCSE Biology Higher** has cleared the pipeline and been promoted to `live` so far — see §6.4.
 
-### Phase 5 — Growth & Freshness Features
+### Phase 5 — Growth & Freshness Features (partially done)
 *Goal: features that increase student engagement and practice freshness.*
 
-- [ ] Custom paper generation (bank-assembled first, free-form AI generation second)
-- [ ] Postgres schema: `question_variants`
-- [ ] AI-generated question variants derived from existing bank questions, validated against the source mark scheme before entering the pool (§3.6)
-- [ ] Variant serving mixed into paper generation and the adaptive practice queue for freshness
-- [ ] Deeper analytics on user practice activity, mistake resolution, and retention
-- [ ] Iteration on adaptive-queue tuning based on real usage data
+- [x] Custom paper generation, bank-assembled (`POST /generate/custom-paper`), now with admin-configurable mark totals and a guide timer per qualification (schema phase 12) and exclusion of already-attempted questions — free-form AI generation for gaps not covered by the bank was **not** built
+- [ ] **Not done**: `question_variants` — the table exists in the schema (phase-1-era) but no ingestion, generation, or serving code references it; AI-generated question variants (§3.6) remain undesigned-in-code, not just unlaunched
+- [ ] Variant serving mixed into paper generation / adaptive queue — blocked on the above
+- [x] Deeper analytics: `AttemptHistory` (cross-subject saved-session history, resumable/reviewable via the new `attempts`/`attempt_questions` durability — §7.1) shipped since this phase was written, ahead of schedule
+- [x] Iteration on adaptive-queue tuning based on real usage — reflected in the mastery-exclusion, previous-answer-prefill, and question-group-expansion fixups now in `generate.py`
+
+### Phase 6 — Platform maturity (new; not in the original roadmap)
+*Goal: work that shipped after Phase 5 was written, driven by real ingestion/admin/student usage rather than the original spec — folding it back into the roadmap for accuracy.*
+
+- [x] **Tiered qualifications**: `qualifications` table + `tiers`, `spec_topics.tier_only`, per-tier ingestion and practice filtering for GCSE Higher/Foundation splits (§7.1)
+- [x] **Admin reorganized per-subject**: `AdminManageSubjects` → `AdminSubjectDetail` replaces the original flat ingestion/review split, unifying upload, paper review, misconception approval, and the marking-model rollout console into one per-qualification hub (§4.3)
+- [x] **Marking-model rollout console**: admin UI over `spec_code_marking_models`/`training_jobs` — view per-spec-code training-example counts and status, trigger training runs, and promote to `live` (§6.3–§6.5)
+- [x] **Durable, resumable sessions**: `attempts`/`attempt_questions` (schema phase 19) plus `AttemptHistory` — sessions are no longer answer-and-forget
+- [x] **In-progress answer/session persistence through a page reload** (recent commit) and **free question navigation that never loses unsubmitted progress** (recent commit)
+- [x] **Public marketing site as a separate build target**: `VITE_HOMEPAGE_ONLY` build mode (`HomepageOnlyShell` + `Landing.tsx`), decoupled from the authenticated product build (`FullApp.tsx`) — §4.2
+- [x] **Symbolic/numeric math answer input**: MathLive-based numeric input for answers gradeable with `sympy`
+- [ ] **Open**: object storage migration to Cloudflare R2 for images and (newly) source PDFs; Google OAuth; broadening self-hosted AI marking coverage beyond the single currently-live spec code; confirming/building the standalone live-mark audit job (Phase 4 note above)

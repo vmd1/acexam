@@ -24,6 +24,7 @@ export interface Question {
   marking_dsl?: string;
   mark_scheme_text?: string;
   images?: any[];
+  table_data?: any[] | null;
   answer_type?: AnswerType;
   answer_options?: AnswerOption[] | GridRow[] | { unit: string | null } | null;
   previous_answer?: PreviousAnswer | null;
@@ -35,6 +36,7 @@ export interface PreviousAnswer {
   marks_awarded: number;
   marks_possible: number;
   feedback_text: string | null;
+  www: string[] | string | null;
   missed_points: string[] | string | null;
   misconception_tags: string[] | string | null;
   marked_by: string;

@@ -27,11 +27,67 @@ services:
       timeout: 5s
       retries: 10
 
+  # S3-compatible object storage for extracted question images and the
+  # original uploaded PDFs (storage.py) - replaces the backend_media volume
+  # the backend service used to mount, so both backend replicas (and any
+  # future replica) read/write the same media over the network instead of
+  # depending on a single host's disk. Routed through Traefik like every
+  # other service here rather than published on its own host port, so the
+  # same acexam.localhost network path covers this too.
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-acexam}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-acexam123}
+    volumes:
+      - minio_data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.minio-api.rule=Host(`s3.acexam.localhost`)
+      - traefik.http.routers.minio-api.service=minio-api
+      - traefik.http.services.minio-api.loadbalancer.server.port=9000
+      - traefik.http.routers.minio-console.rule=Host(`s3-console.acexam.localhost`)
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.services.minio-console.loadbalancer.server.port=9001
+
+  # One-off: creates the media bucket (kept private - question images/PDFs
+  # are exam-board copyrighted material, so they're served through the
+  # backend's authenticated /api/media proxy (routers/media.py) rather than
+  # a public S3 URL). Loops on `mc alias set` instead of a minio healthcheck
+  # dependency since the minio/minio image itself has no `mc`/curl to run
+  # one with.
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-05T11-29-45Z
+    restart: "no"
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-acexam} ${MINIO_ROOT_PASSWORD:-acexam123}; do sleep 1; done &&
+      mc mb -p local/${S3_BUCKET:-acexam-media} &&
+      echo 'MinIO bucket ready'
+      "
+
   backend:
     build: ./backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    deploy:
+      replicas: 2
+    labels:
+      # Public routing lives only under /api (main.py mounts every router
+      # there) - /internal/* (the Traefik HTTP-provider config endpoint
+      # below) must never be reachable through this public entrypoint, only
+      # via Traefik's own direct http://backend:8000 fetch, which bypasses
+      # this router entirely. Priority set explicitly rather than relying
+      # on Traefik's implicit rule-length ordering, since frontend's bare
+      # Host(...) rule below would otherwise need to lose to this one on
+      # every request.
+      - traefik.enable=true
+      - traefik.http.routers.backend.rule=Host(`acexam.localhost`) && PathPrefix(`/api`)
+      - traefik.http.routers.backend.priority=10
+      - traefik.http.services.backend.loadbalancer.server.port=8000
     environment:
       DATABASE_URL: postgresql://acexam:acexam@postgres:5432/acexam
       REDIS_URL: redis://redis:6379
@@ -43,20 +99,101 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      # §6.5 self-hosted marking, dynamic loading. backend/training/agent.py
+      # runs on the host (MLX is Metal-backed, native macOS only - can't run
+      # in this Linux container) and loads/evicts spec-code models on demand
+      # against a single shared pool (MAX_CONCURRENT_SERVERS residents at a
+      # time) rather than keeping every live spec code permanently loaded.
+      # There's no HTTP between this backend and that agent at all - every
+      # marking request is queued through Redis (REDIS_URL above; see
+      # MLX_QUEUE_KEY in ai_pipeline.py/agent.py) so either side can scale
+      # independently with zero direct coupling. No env var needed here for
+      # that - the agent just watches the same Redis this backend already
+      # connects to for rate limiting.
+      #
+      # Legacy fallback path (routers/internal.py + traefik below) for a
+      # deployment not using the dynamic agent/queue at all - a fixed set of
+      # always-resident spec codes routed by Traefik's HTTP provider.
+      # Unused whenever the Redis queue above is reachable.
+      MLX_SERVER_URL: http://traefik
+      TRAEFIK_INTERNAL_TOKEN: ${TRAEFIK_INTERNAL_TOKEN:-dev_traefik_token}
+      # storage.py - MinIO locally (S3-compatible API), swap for a real S3/R2
+      # endpoint+creds in prod. The bucket is private; browsers never talk
+      # to S3 directly, only to the backend's own /api/media proxy
+      # (routers/media.py), so only the in-network endpoint is needed here.
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-acexam}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-acexam123}
+      S3_BUCKET: ${S3_BUCKET:-acexam-media}
     volumes:
       - ./backend:/app
-      - backend_media:/app/media
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  traefik:
+    # v3.6.1+ required: earlier v3.x Docker providers hardcode/negotiate
+    # down to old API versions (e.g. 1.24) that Docker Engine 29+ rejects
+    # outright ("client version 1.24 is too old") or, on Docker Desktop for
+    # Mac specifically, fail earlier still with an opaque "API returned a
+    # 400 (Bad Request) but provided no error-message" during the docker
+    # client's own startup Info() call - confirmed exactly reproduced on
+    # v3.1 and v3.5 against this host's Docker Engine 29.7.2. Fixed in
+    # v3.6.1 (traefik/traefik#12256): the Docker provider now auto-negotiates
+    # against whatever API version the daemon actually supports instead of
+    # assuming one, with no extra config needed.
+    image: traefik:v3.6
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    command:
+      - --entrypoints.web.address=:80
+      - --providers.http.endpoint=http://backend:8000/internal/traefik-config
+      - --providers.http.pollInterval=5s
+      - --providers.http.headers.X-Internal-Token=${TRAEFIK_INTERNAL_TOKEN:-dev_traefik_token}
+      # Docker provider: discovers backend/frontend's replica containers
+      # directly from the Docker API (each replica as its own load-balanced
+      # server, not just a DNS name) and routes by the traefik.* labels on
+      # those services below - separate from, and additive to, the custom
+      # HTTP provider above (which only ever serves the legacy per-spec-code
+      # MLX routers; Traefik merges routers/services from both providers,
+      # namespaced by provider so names never collide).
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --log.level=WARN
+    volumes:
+      # Read-only: only what the Docker provider needs to discover
+      # containers/labels. Note for whoever revisits this: mounting the
+      # Docker socket at all - even read-only - gives this container
+      # inspect-level visibility into every other container on the host
+      # (including their env vars), which is a real privilege grant, not a
+      # no-op. Standard/expected for local Traefik+Compose service
+      # discovery, but worth knowing it's there.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - backend
 
   frontend:
     build: ./frontend
     restart: unless-stopped
-    ports:
-      - "5173:5173"
+    # Single instance only - unlike the backend (a real stateless API, safe
+    # to replicate), this runs `vite dev`, and all replicas would share one
+    # frontend_node_modules volume below. Two independent dev-server
+    # processes writing to the same on-disk .vite/deps optimize-deps cache
+    # race each other - one process's re-optimization can overwrite a chunk
+    # file the other already handed a browser a reference to mid-request,
+    # which is exactly what produced "Invalid hook call"/two mismatched
+    # react-dom copies in one page load. A production build (`vite build`
+    # output served statically) would be safe to replicate; a hot-reloading
+    # dev server is not.
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.frontend.rule=Host(`acexam.localhost`)
+      - traefik.http.services.frontend.loadbalancer.server.port=5173
     environment:
       BACKEND_URL: http://backend:8000
     volumes:
@@ -67,5 +204,5 @@ services:
 
 volumes:
   pg_data:
-  backend_media:
+  minio_data:
   frontend_node_modules:

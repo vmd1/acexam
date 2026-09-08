@@ -62,7 +62,7 @@ async def rate_limit(request: Request, limit: int = 60, window: int = 60):
     try:
         current_count = await redis_client.get(key)
         if current_count and int(current_count) >= limit:
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            raise HTTPException(status_code=429, detail="You're going a bit fast - give it a moment and try again.")
         
         pipe = redis_client.pipeline()
         pipe.incr(key)

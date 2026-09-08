@@ -39,6 +39,9 @@ class UpdateUserSubjectRequest(BaseModel):
     level: Optional[str] = None
     subject: Optional[str] = None
     tier: Optional[str] = None
+    target_grade: Optional[str] = None
+    latest_test_grade: Optional[str] = None
+    show_latest_test_grade: Optional[bool] = None
 
 @router.post("/register")
 async def register(req: RegisterRequest, db=Depends(get_db)):
@@ -168,7 +171,10 @@ async def list_my_subjects(user_id: str = Depends(get_current_user_id), db=Depen
 
     async with db.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, exam_board, level, subject, tier FROM user_subjects WHERE user_id = $1 ORDER BY created_at ASC",
+            """
+            SELECT id, exam_board, level, subject, tier, target_grade, latest_test_grade, show_latest_test_grade
+            FROM user_subjects WHERE user_id = $1 ORDER BY created_at ASC
+            """,
             user_id
         )
     return [dict(r) for r in rows]
@@ -184,7 +190,7 @@ async def add_my_subject(req: AddUserSubjectRequest, user_id: str = Depends(get_
             INSERT INTO user_subjects (user_id, exam_board, level, subject, tier)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (user_id, exam_board, level, subject) DO UPDATE SET exam_board = EXCLUDED.exam_board, tier = EXCLUDED.tier
-            RETURNING id, exam_board, level, subject, tier
+            RETURNING id, exam_board, level, subject, tier, target_grade, latest_test_grade, show_latest_test_grade
             """,
             user_id, req.exam_board, req.level, req.subject, req.tier
         )
@@ -217,7 +223,7 @@ async def update_my_subject(
             f"""
             UPDATE user_subjects SET {', '.join(fields)}
             WHERE id = ${len(params) - 1} AND user_id = ${len(params)}
-            RETURNING id, exam_board, level, subject, tier
+            RETURNING id, exam_board, level, subject, tier, target_grade, latest_test_grade, show_latest_test_grade
             """,
             *params
         )

@@ -47,6 +47,45 @@ async def run_migrations():
     with open('schema_phase12.sql', 'r') as f:
         schema_12 = f.read()
 
+    with open('schema_phase13.sql', 'r') as f:
+        schema_13 = f.read()
+
+    with open('schema_phase14.sql', 'r') as f:
+        schema_14 = f.read()
+
+    with open('schema_phase15.sql', 'r') as f:
+        schema_15 = f.read()
+
+    with open('schema_phase16.sql', 'r') as f:
+        schema_16 = f.read()
+
+    with open('schema_phase17.sql', 'r') as f:
+        schema_17 = f.read()
+
+    with open('schema_phase18.sql', 'r') as f:
+        schema_18 = f.read()
+
+    with open('schema_phase19.sql', 'r') as f:
+        schema_19 = f.read()
+
+    with open('schema_phase20.sql', 'r') as f:
+        schema_20 = f.read()
+
+    with open('schema_phase21.sql', 'r') as f:
+        schema_21 = f.read()
+
+    with open('schema_phase22.sql', 'r') as f:
+        schema_22 = f.read()
+
+    with open('schema_phase23.sql', 'r') as f:
+        schema_23 = f.read()
+
+    with open('schema_phase24.sql', 'r') as f:
+        schema_24 = f.read()
+
+    with open('schema_phase25.sql', 'r') as f:
+        schema_25 = f.read()
+
     print("Executing Phase 1 schema...")
     await conn.execute(schema_1)
 
@@ -82,6 +121,45 @@ async def run_migrations():
 
     print("Executing Phase 12 schema...")
     await conn.execute(schema_12)
+
+    print("Executing Phase 13 schema...")
+    await conn.execute(schema_13)
+
+    print("Executing Phase 14 schema...")
+    await conn.execute(schema_14)
+
+    print("Executing Phase 15 schema...")
+    await conn.execute(schema_15)
+
+    print("Executing Phase 16 schema...")
+    await conn.execute(schema_16)
+
+    print("Executing Phase 17 schema...")
+    await conn.execute(schema_17)
+
+    print("Executing Phase 18 schema...")
+    await conn.execute(schema_18)
+
+    print("Executing Phase 19 schema...")
+    await conn.execute(schema_19)
+
+    print("Executing Phase 20 schema...")
+    await conn.execute(schema_20)
+
+    print("Executing Phase 21 schema...")
+    await conn.execute(schema_21)
+
+    print("Executing Phase 22 schema...")
+    await conn.execute(schema_22)
+
+    print("Executing Phase 23 schema...")
+    await conn.execute(schema_23)
+
+    print("Executing Phase 24 schema...")
+    await conn.execute(schema_24)
+
+    print("Executing Phase 25 schema...")
+    await conn.execute(schema_25)
 
     print("Migrations complete!")
     await conn.close()

@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:homepage": "VITE_HOMEPAGE_ONLY=true vite",
     "build": "tsc -b && vite build",
+    "build:homepage": "VITE_HOMEPAGE_ONLY=true tsc -b && VITE_HOMEPAGE_ONLY=true vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },

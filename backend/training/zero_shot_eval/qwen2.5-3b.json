@@ -1,0 +1,30 @@
+{
+  "spec_slug": "aqa-gcse-biology-higher",
+  "model": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+  "adapter_path": null,
+  "n_test": 50,
+  "held_out_total": 94,
+  "sampled": true,
+  "n_json_parsed": 49,
+  "json_parse_rate": 0.98,
+  "marks_awarded_exact_match_rate": 0.6938775510204082,
+  "www_overlap_f1_mean": 0.6511033265652327,
+  "ebi_overlap_f1_mean": 0.3543095670245019,
+  "misconception_tags_overlap_f1_mean": 0.02040816326530612,
+  "n_unparseable": 1,
+  "n_contradictory_full_marks_with_ebi": 13,
+  "contradictory_rate": 0.2653061224489796,
+  "failures_sample": [
+    {
+      "gold": {
+        "marks_awarded": 0,
+        "www": [],
+        "ebi": [
+          "temperature"
+        ],
+        "misconception_tags": []
+      },
+      "raw": "```json\n{\n  \"marks_awarded\": 1,\n  \"www\": [\"temperature\"],\n  \"ebi\": [\"the independent variable is 'temperature'\"],\n  \"misconception_tags\": []\n}\n```\n\n```json\n{\n  \"marks_awarded\": 1,\n  \"www\": [\"temperature\"],\n  \"ebi\": [],\n  \"misconception_tags\": [\"independent variable is 'temperature'\"]\n}\n```"
+    }
+  ]
+}

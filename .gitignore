@@ -19,6 +19,11 @@ frontend/build/
 # Media / uploads
 backend/media/
 
+# Generated training artifacts (model weights, assembled datasets) - large
+# and reproducible from the DB + train_lora.py, not meant to be committed.
+backend/training/adapters/
+backend/training/data/
+
 # OS
 .DS_Store
 

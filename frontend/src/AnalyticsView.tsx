@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
 import api from './api';
 import { groupByTopicHierarchy } from './topicHierarchy';
+import { parseSubjectKey } from './PracticeSetup';
 import Spinner from './Spinner';
 import EmptyState from './EmptyState';
-import { LineChart, CheckCircle2, AlertTriangle, XCircle, MessageSquareWarning } from 'lucide-react';
+import { LineChart, CheckCircle2, AlertTriangle, XCircle, MessageSquareWarning, ArrowLeft } from 'lucide-react';
 
 function masteryColor(scorePct: number) {
   if (scorePct >= 75) return 'var(--success)';
@@ -18,16 +20,21 @@ function MasteryIcon({ scorePct }: { scorePct: number }) {
 }
 
 export default function AnalyticsView() {
+  const { subjectKey = '' } = useParams();
+  const { level, exam_board, subject } = parseSubjectKey(decodeURIComponent(subjectKey));
+
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetchProfile();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subject, exam_board, level]);
 
   const fetchProfile = async () => {
+    setLoading(true);
     try {
-      const res = await api.get('/analytics/profile');
+      const res = await api.get('/analytics/profile', { params: { subject, exam_board, level } });
       setData(res.data);
     } catch (err) {
       console.error('Failed to load analytics', err);
@@ -36,25 +43,29 @@ export default function AnalyticsView() {
     }
   };
 
-  const subjectGroups = useMemo(() => {
-    const bySubject = new Map<string, any[]>();
-    (data?.topic_mastery || []).forEach((t: any) => {
-      const key = t.subject || 'Other';
-      if (!bySubject.has(key)) bySubject.set(key, []);
-      bySubject.get(key)!.push(t);
-    });
-
-    const avg = (arr: any[]) => (arr.length ? arr.reduce((s, t) => s + t.mastery_score, 0) / arr.length : 0);
-
-    return Array.from(bySubject.entries()).map(([subject, topics]) => ({
-      subject,
-      avg: avg(topics),
-      topicCount: topics.length,
-      subTopics: groupByTopicHierarchy(topics).map(g => ({
-        label: g.label,
-        avg: avg(g.topics),
-        topics: g.topics,
-      })),
+  // Single subject per page now, so this just groups straight into the
+  // topic hierarchy rather than a subject -> hierarchy nesting.
+  // Only average topics the student has actually attempted at least once -
+  // spec_topics the student has never practiced come back from the API with
+  // mastery_score defaulted to 0.0 (COALESCE, not a real score), and
+  // including those as zeros in the average was dragging a group's overall
+  // mastery far below what the student was actually scoring on the topics
+  // they had practiced (e.g. near-full marks on 2 attempted sub-topics still
+  // showing a near-0% group average because 20 sibling sub-topics were
+  // never attempted).
+  // null (not 0) when nothing in the group has been attempted yet - a
+  // group average of 0 reads as "0% mastery", which is a different claim
+  // from "no data yet" and was showing for every topic the student simply
+  // hadn't reached.
+  const avg = (arr: any[]): number | null => {
+    const attempted = arr.filter(t => t.attempts_count > 0);
+    return attempted.length ? attempted.reduce((s, t) => s + t.mastery_score, 0) / attempted.length : null;
+  };
+  const subTopics = useMemo(() => {
+    return groupByTopicHierarchy(data?.topic_mastery || []).map((g: any) => ({
+      label: g.label,
+      avg: avg(g.topics),
+      topics: g.topics,
     }));
   }, [data]);
 
@@ -65,9 +76,12 @@ export default function AnalyticsView() {
   return (
     <div className="container" style={{ marginTop: '2.5rem', marginBottom: '4rem' }}>
       <div style={{ marginBottom: '2rem' }}>
-        <h1>Master Student Profile</h1>
+        <Link to={`/app/subject/${subjectKey}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '0.75rem' }}>
+          <ArrowLeft size={16} aria-hidden="true" /> Back to {subject}
+        </Link>
+        <h1>{subject} analytics</h1>
         <p style={{ color: 'var(--text-secondary)' }}>
-          A real-time picture of where you stand: mastery per topic, memory decay over time, and misconceptions we're still watching.
+          {level} {exam_board} - a real-time picture of where you stand: mastery per topic, memory decay over time, and misconceptions we're still watching.
         </p>
       </div>
 
@@ -117,18 +131,18 @@ export default function AnalyticsView() {
         {/* Specification Topic Mastery Tree Heatmap */}
         <div className="card">
           <h3>Topic mastery</h3>
-          {subjectGroups.length === 0 ? (
+          {subTopics.length === 0 ? (
             <EmptyState
               icon={<LineChart size={40} strokeWidth={1.5} />}
               title="Nothing to show yet"
               description="Answer a few practice questions and your topic-by-topic mastery will build up here."
             />
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '1rem' }}>
-              {subjectGroups.map(group => {
-                const subjectPct = Math.round(group.avg * 100);
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1rem' }}>
+              {subTopics.map((sub: any) => {
+                const subPct = sub.avg == null ? null : Math.round(sub.avg * 100);
                 return (
-                  <details key={group.subject} style={{
+                  <details key={sub.label} style={{
                     background: 'var(--bg-tertiary)',
                     borderRadius: '8px',
                     border: '1px solid var(--border)',
@@ -141,82 +155,61 @@ export default function AnalyticsView() {
                       alignItems: 'center',
                       fontWeight: 700,
                     }}>
-                      <span>{group.subject}</span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: masteryColor(subjectPct), fontSize: '0.9rem' }}>
-                        <MasteryIcon scorePct={subjectPct} />
-                        {subjectPct}% avg &middot; {group.topicCount} topics
-                      </span>
+                      <span>{sub.label}</span>
+                      {subPct == null ? (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Not attempted yet</span>
+                      ) : (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: masteryColor(subPct), fontSize: '0.9rem' }}>
+                          <MasteryIcon scorePct={subPct} />
+                          {subPct}% avg
+                        </span>
+                      )}
                     </summary>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.75rem' }}>
-                      {group.subTopics.map((sub: any) => {
-                        const subPct = Math.round(sub.avg * 100);
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '0.75rem' }}>
+                      {sub.topics.map((topic: any) => {
+                        const notAttempted = topic.attempts_count === 0;
+                        const scorePct = Math.round(topic.mastery_score * 100);
+                        const badgeColor = notAttempted ? 'var(--text-muted)' : masteryColor(scorePct);
                         return (
-                          <details key={sub.label} style={{
+                          <div key={topic.id} style={{
+                            padding: '0.6rem 0.85rem',
                             background: 'var(--bg-tertiary)',
-                            borderRadius: '6px',
-                            border: '1px solid var(--border)',
-                            padding: '0.5rem 0.75rem',
-                            marginLeft: '0.5rem',
+                            borderRadius: '8px',
+                            border: '1px solid var(--border)'
                           }}>
-                            <summary style={{
-                              cursor: 'pointer',
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                              fontWeight: 600,
-                              fontSize: '0.9rem',
-                            }}>
-                              <span>{sub.label}</span>
-                              <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: masteryColor(subPct), fontSize: '0.85rem' }}>
-                                <MasteryIcon scorePct={subPct} />
-                                {subPct}% avg
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', flexWrap: 'wrap', gap: '0.4rem' }}>
+                              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                                {topic.spec_code} {topic.title}
                               </span>
-                            </summary>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '0.65rem' }}>
-                              {sub.topics.map((topic: any) => {
-                                const scorePct = Math.round(topic.mastery_score * 100);
-                                const badgeColor = masteryColor(scorePct);
-                                return (
-                                  <div key={topic.id} style={{
-                                    padding: '0.6rem 0.85rem',
-                                    background: 'var(--bg-tertiary)',
-                                    borderRadius: '8px',
-                                    border: '1px solid var(--border)'
-                                  }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', flexWrap: 'wrap', gap: '0.4rem' }}>
-                                      <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                                        {topic.spec_code} {topic.title}
-                                      </span>
-                                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 700, color: badgeColor, fontSize: '0.85rem' }}>
-                                        <MasteryIcon scorePct={scorePct} />
-                                        {scorePct}% mastery
-                                      </span>
-                                    </div>
-                                    <div style={{
-                                      width: '100%',
-                                      height: '6px',
-                                      background: 'var(--border)',
-                                      borderRadius: '3px',
-                                      overflow: 'hidden'
-                                    }}>
-                                      <div style={{
-                                        width: `${scorePct}%`,
-                                        height: '100%',
-                                        background: badgeColor,
-                                        transition: 'width 0.5s ease'
-                                      }} />
-                                    </div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>
-                                      <span>Attempts: {topic.attempts_count}</span>
-                                      <span>Decay score: {Math.round(topic.decay_score * 100)}%</span>
-                                    </div>
-                                  </div>
-                                );
-                              })}
+                              <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 700, color: badgeColor, fontSize: '0.85rem' }}>
+                                {notAttempted ? 'Not attempted' : (
+                                  <>
+                                    <MasteryIcon scorePct={scorePct} />
+                                    {scorePct}% mastery
+                                  </>
+                                )}
+                              </span>
                             </div>
-                          </details>
+                            <div style={{
+                              width: '100%',
+                              height: '6px',
+                              background: 'var(--border)',
+                              borderRadius: '3px',
+                              overflow: 'hidden'
+                            }}>
+                              <div style={{
+                                width: `${notAttempted ? 0 : scorePct}%`,
+                                height: '100%',
+                                background: badgeColor,
+                                transition: 'width 0.5s ease'
+                              }} />
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>
+                              <span>Attempts: {topic.attempts_count}</span>
+                              {!notAttempted && <span>Decay score: {Math.round(topic.decay_score * 100)}%</span>}
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
@@ -232,6 +225,9 @@ export default function AnalyticsView() {
           {/* Command Word Matrix */}
           <div className="card">
             <h3>Command word accuracy</h3>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '-0.5rem', marginBottom: '0.5rem' }}>
+              Across all your subjects, not just {subject}.
+            </p>
             {data?.command_word_competency?.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
                 {data.command_word_competency.map((cw: any, i: number) => (
