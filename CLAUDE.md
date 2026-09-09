@@ -8,6 +8,10 @@ Acexam — a free AI-powered exam revision platform for UK students (AQA/Edexcel
 
 Stack: FastAPI + asyncpg (Postgres) + Redis backend, React 19 + TypeScript + Vite frontend, Dockerized for local dev.
 
+## Workflow
+
+Once a fix or change has been made and verified, proactively suggest committing it rather than waiting to be asked — but still confirm before actually running `git commit`.
+
 ## Commands
 
 ### Frontend (`frontend/`)
