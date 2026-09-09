@@ -51,7 +51,12 @@ class SetGradeBoundariesRequest(BaseModel):
     boundaries: List[GradeBoundaryEntry]
 
 IN_FLIGHT_TRAINING_STATUSES = ('queued', 'assembling', 'training', 'evaluating')
-DEFAULT_TRAINING_BASE_MODEL = 'mlx-community/Qwen2.5-1.5B-Instruct-4bit'
+# Must stay in sync with train_lora.py's DEFAULT_MODEL - both fall back to
+# this when a training-jobs request omits base_model. Best-known result
+# (94% exact-mark-match on aqa-gcse-biology-higher, job 143d9848) came from
+# this model; a Qwen2.5-1.5B default briefly crept in undocumented and
+# regressed a later retrain's accuracy 94% -> 84%, so pin it explicitly.
+DEFAULT_TRAINING_BASE_MODEL = 'mlx-community/Llama-3.2-3B-Instruct-4bit'
 
 QUALIFICATION_LIST_SQL = '''
     SELECT q.id, q.exam_board, q.level, q.subject, q.tiers,

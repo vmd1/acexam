@@ -49,7 +49,13 @@ _VAL_LOSS_RE = re.compile(r"^Iter (\d+): Val loss ([\d.]+)")
 DATA_ROOT = Path(__file__).parent / "data"
 ADAPTERS_ROOT = Path(__file__).parent / "adapters"
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# Must stay in sync with routers/qualifications.py's DEFAULT_TRAINING_BASE_MODEL
+# - both fall back to this when a job has no base_model set. Best-known
+# result (94% exact-mark-match on aqa-gcse-biology-higher, job 143d9848)
+# came from this model; a Qwen2.5-1.5B default briefly crept in
+# undocumented and regressed a later retrain's accuracy 94% -> 84%, so pin
+# it explicitly.
+DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 LORA_DROPOUT = 0.05
 BATCH_SIZE_DEFAULT = 2  # safe on a 24GB Mac for models up to ~1.5B - see _batch_size_for_model below
 NUM_LAYERS = -1  # all layers, appropriate for a 1.5B-3B base model
@@ -104,7 +110,13 @@ def _batch_size_for_model(model: str) -> int:
 # real corpus max is 1953 tokens; raised straight to mlx_lm's own 2048
 # default rather than another narrow headroom bump, since that's already
 # the ceiling this constant was deliberately kept under before.
-MAX_SEQ_LENGTH = 2048
+#
+# Re-measured again after the AQA/GCSE/Biology/Higher ingestion audit
+# (multi-topic tagging, batched grading calls, MARKS:n: DSL) grew individual
+# examples further - real corpus max is now 2439 tokens, already past the
+# old 2048 cap (there's no lower ceiling left to stay under - mlx_lm has no
+# fixed default beyond this). Raised with headroom above that new real max.
+MAX_SEQ_LENGTH = 2688
 
 
 @dataclass
